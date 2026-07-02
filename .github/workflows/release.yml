@@ -96,7 +96,7 @@ jobs:
           sha="$(curl --retry 5 -Ls "$url" | sha256sum | cut -d ' ' -f 1)"
           git clone "https://x-access-token:${TOKEN}@github.com/Yarden-zamir/homebrew-tap.git" tap
           cd tap
-          branch="bump-${BIN}-${TAG}"
+          branch="bump-${BIN}-${TAG}-${GITHUB_RUN_ID}"
           git checkout -B "$branch"
           mkdir -p Formula
           cat > "Formula/${BIN}.rb" <<RUBY
