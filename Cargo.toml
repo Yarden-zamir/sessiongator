@@ -1,0 +1,16 @@
+[package]
+name = "sessiongator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+gator = { path = "../gator" }
+ratatui.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+tui-input.workspace = true
+
+[[bin]]
+name = "sessiongator"
+path = "src/main.rs"
