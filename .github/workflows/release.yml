@@ -1,0 +1,141 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  BIN: sessiongator
+  REPO: sessiongator
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test
+
+  build:
+    needs: checks
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact: linux-x86_64
+          - os: macos-14
+            artifact: macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: |
+          mkdir -p dist
+          cp "target/release/${BIN}" "dist/${BIN}"
+          tar -C dist -czf "${BIN}-${{ matrix.artifact }}.tar.gz" "${BIN}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN }}-${{ matrix.artifact }}
+          path: ${{ env.BIN }}-${{ matrix.artifact }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - id: version
+        run: |
+          version="$(awk -F '"' '/^version =/ { print $2; exit }' Cargo.toml)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+      - id: release
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            git tag "$tag"
+            git push origin "$tag"
+          fi
+          gh release create "$tag" dist/*.tar.gz --title "$tag" --notes "Release $tag"
+          echo "released=true" >> "$GITHUB_OUTPUT"
+
+  homebrew:
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Open tap bump PR
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+          TOKEN: ${{ secrets.TOKEN }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          url="https://github.com/Yarden-zamir/${REPO}/archive/refs/tags/${TAG}.tar.gz"
+          sha="$(curl --retry 5 -Ls "$url" | sha256sum | cut -d ' ' -f 1)"
+          git clone "https://x-access-token:${TOKEN}@github.com/Yarden-zamir/homebrew-tap.git" tap
+          cd tap
+          branch="bump-${BIN}-${TAG}"
+          git checkout -B "$branch"
+          mkdir -p Formula
+          cat > "Formula/${BIN}.rb" <<RUBY
+# typed: false
+# frozen_string_literal: true
+
+class Sessiongator < Formula
+  desc "Rust TUI browser for Claude Code and opencode sessions"
+  homepage "https://github.com/Yarden-zamir/sessiongator"
+  url "$url"
+  sha256 "$sha"
+  license "MIT"
+  head "https://github.com/Yarden-zamir/sessiongator.git", branch: "main"
+
+  depends_on "rust" => :build
+
+  def install
+    system "cargo", "install", *std_cargo_args
+    pkgshare.install "scripts/sessiongator.zsh"
+  end
+
+  def caveats
+    <<~EOS
+      To activate the zsh session widget, add this to your .zshrc:
+        source #{opt_pkgshare}/sessiongator.zsh
+
+      Then bind it, for example:
+        bindkey '^S' ai-sessions
+    EOS
+  end
+
+  test do
+    system "#{bin}/sessiongator", "--list"
+  end
+end
+RUBY
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Formula/${BIN}.rb"
+          git commit -m "${BIN} ${TAG}"
+          git push --force-with-lease origin "$branch"
+          gh pr create --repo Yarden-zamir/homebrew-tap --head "$branch" --base main --title "${BIN} ${TAG}" --body "/auto-merge"

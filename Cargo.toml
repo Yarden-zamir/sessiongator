@@ -1,15 +1,20 @@
 [package]
 name = "sessiongator"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2021"
+description = "Rust TUI browser for Claude Code and opencode sessions"
+license = "MIT"
+repository = "https://github.com/Yarden-zamir/sessiongator"
+keywords = ["tui", "ratatui", "sessions", "claude", "opencode"]
+categories = ["command-line-interface", "development-tools"]
 
 [dependencies]
-crossterm.workspace = true
-gator = { path = "../gator" }
-ratatui.workspace = true
-rusqlite.workspace = true
-serde_json.workspace = true
-tui-input.workspace = true
+crossterm = "0.29"
+gator = { git = "https://github.com/Yarden-zamir/gator", tag = "v0.1.0" }
+ratatui = "0.30"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = "1.0"
+tui-input = { version = "0.15", features = ["crossterm"] }
 
 [[bin]]
 name = "sessiongator"
