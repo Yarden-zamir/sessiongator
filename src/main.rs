@@ -1,4 +1,5 @@
 mod model;
+mod native_import;
 mod search;
 mod session;
 mod sources;
@@ -10,6 +11,7 @@ use crate::model::{now_ms, rel_time, shorten_home, sort_sessions, SortMode};
 use crate::sources::sources_from_env;
 
 const USAGE: &str = "Usage: sessiongator [--list]
+       sessiongator convert --id <id> --from <claude|opencode> --to <claude|opencode> [options]
 
 Browse, search, and resume Claude Code and opencode sessions.
 
@@ -17,10 +19,14 @@ Browse, search, and resume Claude Code and opencode sessions.
               resume\\t<tool>\\t<id>\\t<cwd>   (Enter)
               path\\t<source path>           (Ctrl+O)
   --list      print all sessions, newest first (tool, id, age, cwd, title)
+  convert     convert one session into the target tool's native store
   -h, --help  show this help";
 
 fn main() -> AppResult<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "convert") {
+        return native_import::run_convert(&args[1..]);
+    }
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         println!("{USAGE}");
         return Ok(());

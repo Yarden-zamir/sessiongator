@@ -1,0 +1,14 @@
+{
+  "sourceTool": "claude",
+  "targetTool": "opencode",
+  "sourceId": "11111111-2222-4333-8444-555555555555",
+  "title": "Fixture native import demo",
+  "cwd": "/tmp/sessiongator-demo",
+  "messageCount": 3,
+  "partCounts": {
+    "reasoning": 1,
+    "text": 2,
+    "tool_call": 1,
+    "tool_result": 1
+  }
+}

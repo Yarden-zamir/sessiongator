@@ -1,0 +1,47 @@
+name: native import compatibility
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test native_import -- --nocapture
+
+  latest-tools:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: latest
+      - name: Install latest Claude Code and opencode when available
+        shell: bash
+        run: |
+          mkdir -p artifacts/native-import-latest
+          npm install -g @anthropic-ai/claude-code || true
+          npm install -g opencode-ai || npm install -g opencode || true
+          {
+            printf '{\n'
+            printf '  "claude": '
+            if command -v claude >/dev/null 2>&1; then claude --version | jq -Rs .; else printf 'null\n'; fi
+            printf '  ,"opencode": '
+            if command -v opencode >/dev/null 2>&1; then opencode --version | jq -Rs .; else printf 'null\n'; fi
+            printf '}\n'
+          } > artifacts/native-import-latest/tool-versions.json
+      - run: cargo test native_import -- --nocapture
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-import-latest-report
+          path: artifacts/native-import-latest/**

@@ -61,6 +61,20 @@ fn path_selection(session: &Session) -> String {
     format!("path\t{}", session.source_ref)
 }
 
+fn convert_selection(session: &Session) -> String {
+    let target = match session.tool {
+        Tool::Claude => "opencode",
+        Tool::Opencode => "claude",
+    };
+    format!(
+        "convert\t{}\t{}\t{}\t{}",
+        session.tool.name(),
+        target,
+        session.id,
+        session.cwd
+    )
+}
+
 fn spawn_session_load(tx: mpsc::Sender<SessionBatch>) {
     thread::spawn(move || {
         let sources = sources_from_env();
@@ -409,6 +423,15 @@ pub fn select_session() -> AppResult<Option<String>> {
                                 return Ok(Some(path_selection(session)));
                             }
                         }
+                        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if let Some(session) = filtered
+                                .get(selected)
+                                .and_then(|index| sessions.get(*index))
+                            {
+                                terminal.show_cursor()?;
+                                return Ok(Some(convert_selection(session)));
+                            }
+                        }
                         KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if let Some(session) = filtered
                                 .get(selected)
@@ -444,11 +467,6 @@ pub fn select_session() -> AppResult<Option<String>> {
                                 })
                                 .unwrap_or(0);
                             list_offset = 0;
-                        }
-                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            input.handle(InputRequest::DeleteLine);
-                            needs_refilter = true;
-                            reset_selection = true;
                         }
                         KeyCode::Up if focus == Focus::List => {
                             selected = selected.saturating_sub(1);
@@ -594,10 +612,10 @@ fn help_line(search_mode: SearchMode, sort_mode: SortMode, palette: &Palette) ->
         Span::styled(format!(" sort:{}  ", sort_mode.label()), accent),
         Span::styled("^o", key_style),
         Span::styled(" path  ", text_style),
+        Span::styled("^t", key_style),
+        Span::styled(" convert  ", text_style),
         Span::styled("^y", key_style),
         Span::styled(" copy id  ", text_style),
-        Span::styled("^u", key_style),
-        Span::styled(" clear  ", text_style),
         Span::styled("→/←", key_style),
         Span::styled(" focus transcript/list  ", text_style),
         Span::styled("↑↓", key_style),
@@ -657,6 +675,14 @@ mod tests {
         let opencode = session(Tool::Opencode, "ses_1", "/w");
         assert_eq!(resume_selection(&opencode), "resume\topencode\tses_1\t/w");
         assert_eq!(path_selection(&claude), "path\t/store/ref");
+        assert_eq!(
+            convert_selection(&claude),
+            "convert\tclaude\topencode\tabc-123\t/Users/me/proj"
+        );
+        assert_eq!(
+            convert_selection(&opencode),
+            "convert\topencode\tclaude\tses_1\t/w"
+        );
     }
 
     #[test]

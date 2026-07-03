@@ -20,6 +20,14 @@ List sessions without the TUI:
 sessiongator --list
 ```
 
+Dry-run a native conversion by session id:
+
+```sh
+sessiongator convert --from claude --to opencode --id <session-id> --dry-run --plan-json
+```
+
+The converter checks known supported tool versions before writing. Live opencode writes create a database backup by default; Claude writes use an atomic JSONL file write.
+
 ## Zsh Widget
 
 ```sh
@@ -28,6 +36,7 @@ bindkey '^S' ai-sessions
 ```
 
 The wrapper writes selections through `GATOR_OUTPUT`; otherwise `sessiongator` prints selections to stdout.
+Inside the TUI, press `Ctrl+T` on a selected session to place a dry-run `sessiongator convert ...` command in your shell prompt.
 
 ## Build
 

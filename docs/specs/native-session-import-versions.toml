@@ -1,0 +1,77 @@
+# Version/fixture manifest for the native session import spec.
+# This is intentionally checked in so implementation and CI can use the same
+# source of truth for supported versions and required fixtures.
+
+[metadata]
+spec = "docs/specs/native-session-import.md"
+researched_at = "2026-07-03"
+
+[[tools]]
+tool = "claude"
+version = "2.1.199"
+status = "target-supported"
+source = "local-sampling-and-docs"
+store = "jsonl-projects"
+fixture_root = "fixtures/native-import/claude/2.1.199"
+required_fixtures = [
+  "basic-text",
+  "tool-use",
+  "attachments",
+  "reasoning",
+  "subagent-sidecar",
+]
+notes = "Claude JSONL is not documented as a stable import API; live target writes require resume verification with claude -r."
+
+[[tools]]
+tool = "opencode"
+version = "1.17.13"
+status = "target-supported"
+source = "local-sampling-and-upstream-schema"
+store = "sqlite"
+fixture_root = "fixtures/native-import/opencode/1.17.13"
+schema_tables = [
+  "project",
+  "project_directory",
+  "session",
+  "message",
+  "part",
+  "session_message",
+  "session_input",
+  "session_context_epoch",
+  "todo",
+  "event",
+  "event_sequence",
+]
+required_fixtures = [
+  "basic-text",
+  "tool-use",
+  "attachments",
+  "reasoning",
+  "compaction",
+  "todo",
+]
+notes = "Prefer current session_message schema; compatibility projections may be needed for message/part readers."
+
+[[tools]]
+tool = "opencode"
+version_range = "1.17.9..=1.17.13"
+status = "read-observed"
+source = "local-migrated-db"
+store = "sqlite"
+notes = "Rows from these versions were observed in a migrated 1.17.13 DB. Write support needs per-version fixtures."
+
+[[tools]]
+tool = "opencode"
+version_range = "1.14.22..=1.14.48"
+status = "read-observed"
+source = "local-migrated-db"
+store = "sqlite"
+notes = "Historical sessions observed after migration; do not write new sessions using these versions."
+
+[[tools]]
+tool = "opencode"
+version_range = "1.1.17..=1.2.27"
+status = "read-observed"
+source = "local-migrated-db"
+store = "sqlite"
+notes = "Historical sessions observed after migration; do not write new sessions using these versions."

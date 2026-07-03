@@ -29,8 +29,9 @@ _sessiongator_bin() {
 # Selection lines from the binary:
 #   resume\t<tool>\t<id>\t<cwd>   (Enter)
 #   path\t<source path>           (Ctrl+O)
+#   convert\t<from>\t<to>\t<id>\t<cwd>   (Ctrl+T)
 ai-sessions() {
-  local bin tmp exit_status selection kind tool id dir
+  local bin tmp exit_status selection kind tool id dir target
   bin="$(_sessiongator_bin)" || { echo "sessiongator binary not found" >&2; return 127; }
   tmp="$(mktemp -t sessiongator.XXXXXX)" || return 1
   [[ -n "$ZLE" ]] && zle -I
@@ -72,6 +73,14 @@ ai-sessions() {
     path)
       # Insert the source path into the prompt for further scripting.
       BUFFER="${(q)${selection#*$'\t'}}"
+      CURSOR=${#BUFFER}
+      ;;
+    convert)
+      local rest="${selection#*$'\t'}"
+      tool="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
+      target="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
+      id="${rest%%$'\t'*}"
+      BUFFER="sessiongator convert --from ${(q)tool} --to ${(q)target} --id ${(q)id} --dry-run --plan-json"
       CURSOR=${#BUFFER}
       ;;
     *)
