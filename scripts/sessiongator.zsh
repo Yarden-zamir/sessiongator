@@ -7,11 +7,6 @@ _sessiongator_bin() {
     return 0
   fi
 
-  if command -v sessiongator >/dev/null 2>&1; then
-    command -v sessiongator
-    return 0
-  fi
-
   if [[ -x "$_SESSIONGATOR_SCRIPT_DIR/../target/release/sessiongator" ]]; then
     echo "$_SESSIONGATOR_SCRIPT_DIR/../target/release/sessiongator"
     return 0
@@ -19,6 +14,11 @@ _sessiongator_bin() {
 
   if [[ -x "$_SESSIONGATOR_SCRIPT_DIR/../target/debug/sessiongator" ]]; then
     echo "$_SESSIONGATOR_SCRIPT_DIR/../target/debug/sessiongator"
+    return 0
+  fi
+
+  if command -v sessiongator >/dev/null 2>&1; then
+    command -v sessiongator
     return 0
   fi
 

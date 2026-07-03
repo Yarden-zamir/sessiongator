@@ -468,6 +468,32 @@ pub fn select_session() -> AppResult<Option<String>> {
                                 .unwrap_or(0);
                             list_offset = 0;
                         }
+                        KeyCode::Up
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && focus == Focus::List =>
+                        {
+                            selected = 0;
+                            transcript_scroll = 0;
+                        }
+                        KeyCode::Down
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && focus == Focus::List =>
+                        {
+                            selected = filtered.len().saturating_sub(1);
+                            transcript_scroll = 0;
+                        }
+                        KeyCode::Up
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && focus == Focus::Transcript =>
+                        {
+                            transcript_scroll = 0;
+                        }
+                        KeyCode::Down
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && focus == Focus::Transcript =>
+                        {
+                            transcript_scroll = transcript_max_scroll;
+                        }
                         KeyCode::Up if focus == Focus::List => {
                             selected = selected.saturating_sub(1);
                             transcript_scroll = 0;
