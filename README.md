@@ -4,6 +4,8 @@ Rust TUI browser for Claude Code and opencode sessions.
 
 ## Install
 
+Homebrew tap: https://github.com/Yarden-zamir/homebrew-tap
+
 ```sh
 brew install yarden-zamir/tap/sessiongator
 ```
