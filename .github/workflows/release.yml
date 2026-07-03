@@ -84,58 +84,10 @@ jobs:
   homebrew:
     needs: release
     if: needs.release.outputs.released == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Open tap bump PR
-        env:
-          GH_TOKEN: ${{ secrets.TOKEN }}
-          TOKEN: ${{ secrets.TOKEN }}
-          TAG: ${{ needs.release.outputs.tag }}
-        run: |
-          url="https://github.com/Yarden-zamir/${REPO}/archive/refs/tags/${TAG}.tar.gz"
-          sha="$(curl --retry 5 -Ls "$url" | sha256sum | cut -d ' ' -f 1)"
-          git clone "https://x-access-token:${TOKEN}@github.com/Yarden-zamir/homebrew-tap.git" tap
-          cd tap
-          branch="bump-${BIN}-${TAG}-${GITHUB_RUN_ID}"
-          git checkout -B "$branch"
-          mkdir -p Formula
-          cat > "Formula/${BIN}.rb" <<RUBY
-          # typed: false
-          # frozen_string_literal: true
-
-          class Sessiongator < Formula
-            desc "Rust TUI browser for Claude Code and opencode sessions"
-            homepage "https://github.com/Yarden-zamir/sessiongator"
-            url "$url"
-            sha256 "$sha"
-            license "MIT"
-            head "https://github.com/Yarden-zamir/sessiongator.git", branch: "main"
-
-            depends_on "rust" => :build
-
-            def install
-              system "cargo", "install", *std_cargo_args
-              pkgshare.install "scripts/sessiongator.zsh"
-            end
-
-            def caveats
-              <<~EOS
-                To activate the zsh session widget, add this to your .zshrc:
-                  source #{opt_pkgshare}/sessiongator.zsh
-
-                Then bind it, for example:
-                  bindkey '^S' ai-sessions
-              EOS
-            end
-
-            test do
-              system "#{bin}/sessiongator", "--list"
-            end
-          end
-          RUBY
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "Formula/${BIN}.rb"
-          git commit -m "${BIN} ${TAG}"
-          git push --force-with-lease origin "$branch"
-          gh pr create --repo Yarden-zamir/homebrew-tap --head "$branch" --base main --title "${BIN} ${TAG}" --body "/auto-merge"
+    uses: Yarden-zamir/homebrew-tap/.github/workflows/sync-formula.yml@main
+    with:
+      formula: sessiongator
+      tag: ${{ needs.release.outputs.tag }}
+      repository: Yarden-zamir/sessiongator
+    secrets:
+      token: ${{ secrets.TOKEN }}
