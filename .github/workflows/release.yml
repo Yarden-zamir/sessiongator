@@ -3,6 +3,11 @@ name: release
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - README.md
+      - Readme.md
+      - readme.md
+      - .github/workflows/**
   workflow_dispatch:
 
 env:
@@ -78,7 +83,44 @@ jobs:
             git tag "$tag"
             git push origin "$tag"
           fi
-          gh release create "$tag" dist/*.tar.gz --title "$tag" --notes "Release $tag"
+
+          previous_tag=""
+          for candidate in $(git tag --sort=-creatordate); do
+            if [ "$candidate" != "$tag" ]; then
+              previous_tag="$candidate"
+              break
+            fi
+          done
+
+          if [ -n "$previous_tag" ]; then
+            range="$previous_tag..HEAD"
+          else
+            range="HEAD"
+          fi
+
+          {
+            echo "## Changelog"
+            echo
+            if [ -n "$previous_tag" ]; then
+              echo "Changes since $previous_tag."
+              echo
+            fi
+            for commit in $(git rev-list --reverse "$range"); do
+              short="$(git rev-parse --short "$commit")"
+              subject="$(git log -1 --format=%s "$commit")"
+              body="$(git log -1 --format=%b "$commit")"
+              echo "- $short $subject"
+              if [ -n "$body" ]; then
+                while IFS= read -r line; do
+                  if [ -n "$line" ]; then
+                    echo "  $line"
+                  fi
+                done <<< "$body"
+              fi
+            done
+          } > release-notes.md
+
+          gh release create "$tag" dist/*.tar.gz --title "$tag" --notes-file release-notes.md
           echo "released=true" >> "$GITHUB_OUTPUT"
 
   homebrew:
