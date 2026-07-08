@@ -19,6 +19,9 @@ jobs:
   latest-tools:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -31,17 +34,53 @@ jobs:
           mkdir -p artifacts/native-import-latest
           npm install -g @anthropic-ai/claude-code || true
           npm install -g opencode-ai || npm install -g opencode || true
-          {
-            printf '{\n'
-            printf '  "claude": '
-            if command -v claude >/dev/null 2>&1; then claude --version | jq -Rs .; else printf 'null\n'; fi
-            printf '  ,"opencode": '
-            if command -v opencode >/dev/null 2>&1; then opencode --version | jq -Rs .; else printf 'null\n'; fi
-            printf '}\n'
-          } > artifacts/native-import-latest/tool-versions.json
-      - run: cargo test native_import -- --nocapture
+          claude_version=""
+          opencode_version=""
+          if command -v claude >/dev/null 2>&1; then
+            read -r claude_version _ <<< "$(claude --version)"
+          fi
+          if command -v opencode >/dev/null 2>&1; then
+            read -r opencode_version _ <<< "$(opencode --version)"
+          fi
+          printf 'CLAUDE_VERSION=%s\n' "$claude_version" >> "$GITHUB_ENV"
+          printf 'OPENCODE_VERSION=%s\n' "$opencode_version" >> "$GITHUB_ENV"
+          printf '{"claude":"%s","opencode":"%s"}\n' "$claude_version" "$opencode_version" \
+            > artifacts/native-import-latest/tool-versions.json
+      - run: cargo build --release
+      - name: Probe latest native import compatibility
+        run: scripts/probe-native-import-latest.sh
+        env:
+          SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS: artifacts/native-import-latest
+      - name: Update supported version manifest
+        run: |
+          node scripts/update-native-import-versions.mjs \
+            --claude "$CLAUDE_VERSION" \
+            --opencode "$OPENCODE_VERSION" \
+            > artifacts/native-import-latest/manifest-additions.toml
+      - run: cargo fmt -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
+      - name: Verify manifest-backed gate accepts latest tools
+        if: env.CLAUDE_VERSION != '' && env.OPENCODE_VERSION != ''
+        run: scripts/probe-native-import-latest.sh
+        env:
+          SESSIONGATOR_NATIVE_IMPORT_ALLOW_UNSUPPORTED: "0"
+          SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS: artifacts/native-import-latest/supported-gate
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: native-import-latest-report
           path: artifacts/native-import-latest/**
+      - uses: peter-evans/create-pull-request@v6
+        with:
+          branch: automation/native-import-supported-versions
+          delete-branch: true
+          title: "chore: update native import supported versions"
+          commit-message: "chore: update native import supported versions"
+          body: |
+            Updates `docs/specs/native-session-import-versions.toml` after the scheduled latest-tool compatibility probe passed.
+
+            Detected versions:
+            - Claude: `${{ env.CLAUDE_VERSION }}`
+            - opencode: `${{ env.OPENCODE_VERSION }}`

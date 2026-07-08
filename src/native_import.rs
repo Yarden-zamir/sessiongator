@@ -13,9 +13,10 @@ use serde_json::{json, Value};
 
 use crate::model::{clean_title, now_ms, parse_iso_utc_ms};
 
-const DEFAULT_CLAUDE: &str = "2.1.203";
-const SUPPORTED_CLAUDE: &[&str] = &["2.1.199", DEFAULT_CLAUDE];
-const SUPPORTED_OPENCODE: &str = "1.17.13";
+const NATIVE_IMPORT_VERSIONS: &str =
+    include_str!("../docs/specs/native-session-import-versions.toml");
+const TARGET_SUPPORTED: &str = "target-supported";
+const READ_OBSERVED: &str = "read-observed";
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +66,14 @@ struct ToolVersion {
     cli_version: Option<String>,
     store_version: Option<String>,
     schema_fingerprint: Option<String>,
+}
+
+#[derive(Default)]
+struct ManifestToolEntry<'a> {
+    tool: Option<&'a str>,
+    version: Option<&'a str>,
+    version_range: Option<&'a str>,
+    status: Option<&'a str>,
 }
 
 #[derive(Clone, Debug)]
@@ -309,10 +318,7 @@ fn ensure_supported(
     if allow || version_supported(version, target) {
         return Ok(());
     }
-    let known = match version.tool {
-        ImportTool::Claude => SUPPORTED_CLAUDE.join(", "),
-        ImportTool::Opencode => SUPPORTED_OPENCODE.to_string(),
-    };
+    let known = known_supported_versions(version.tool);
     Err(format!(
         "unsupported {} {} version: {:?}; known supported version is {known}",
         if target { "target" } else { "source" },
@@ -323,20 +329,24 @@ fn ensure_supported(
 }
 
 fn version_supported(version: &ToolVersion, target: bool) -> bool {
-    match version.tool {
-        ImportTool::Claude => version
-            .cli_version
-            .as_deref()
-            .is_some_and(|cli_version| SUPPORTED_CLAUDE.contains(&cli_version)),
-        ImportTool::Opencode => {
-            version.cli_version.as_deref() == Some(SUPPORTED_OPENCODE)
-                || (!target
-                    && matches!(
-                        version.store_version.as_deref(),
-                        Some("1.17.9" | "1.17.10" | "1.17.11" | "1.17.13")
-                    ))
-        }
+    if version
+        .cli_version
+        .as_deref()
+        .is_some_and(|cli_version| exact_version_supported(version.tool, cli_version))
+    {
+        return true;
     }
+
+    if !target {
+        return version
+            .store_version
+            .as_deref()
+            .is_some_and(|store_version| {
+                observed_store_version_supported(version.tool, store_version)
+            });
+    }
+
+    false
 }
 
 fn detect_version(
@@ -365,6 +375,117 @@ fn command_version(tool: ImportTool) -> Option<String> {
         .split_whitespace()
         .next()
         .map(str::to_string)
+}
+
+fn exact_version_supported(tool: ImportTool, version: &str) -> bool {
+    manifest_entries().into_iter().any(|entry| {
+        entry.tool == Some(tool.name())
+            && entry.status == Some(TARGET_SUPPORTED)
+            && entry.version == Some(version)
+    })
+}
+
+fn observed_store_version_supported(tool: ImportTool, version: &str) -> bool {
+    manifest_entries().into_iter().any(|entry| {
+        if entry.tool != Some(tool.name()) {
+            return false;
+        }
+        if entry.status == Some(TARGET_SUPPORTED) && entry.version == Some(version) {
+            return true;
+        }
+        entry.status == Some(READ_OBSERVED)
+            && entry
+                .version_range
+                .is_some_and(|range| version_in_inclusive_range(version, range))
+    })
+}
+
+fn known_supported_versions(tool: ImportTool) -> String {
+    let versions = exact_supported_versions(tool);
+    if versions.is_empty() {
+        return "none listed in native import manifest".to_string();
+    }
+    versions.join(", ")
+}
+
+fn default_supported_version(tool: ImportTool) -> &'static str {
+    exact_supported_versions(tool)
+        .into_iter()
+        .last()
+        .expect("native import manifest must list at least one target-supported version")
+}
+
+fn exact_supported_versions(tool: ImportTool) -> Vec<&'static str> {
+    manifest_entries()
+        .into_iter()
+        .filter(|entry| entry.tool == Some(tool.name()) && entry.status == Some(TARGET_SUPPORTED))
+        .filter_map(|entry| entry.version)
+        .collect()
+}
+
+fn manifest_entries() -> Vec<ManifestToolEntry<'static>> {
+    let mut entries = Vec::new();
+    let mut current = None;
+
+    for line in NATIVE_IMPORT_VERSIONS.lines() {
+        let line = line.trim();
+        if line == "[[tools]]" {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
+            current = Some(ManifestToolEntry::default());
+            continue;
+        }
+
+        let Some(entry) = current.as_mut() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(value) = toml_string_value(value.trim()) else {
+            continue;
+        };
+
+        match key.trim() {
+            "tool" => entry.tool = Some(value),
+            "version" => entry.version = Some(value),
+            "version_range" => entry.version_range = Some(value),
+            "status" => entry.status = Some(value),
+            _ => {}
+        }
+    }
+
+    if let Some(entry) = current {
+        entries.push(entry);
+    }
+
+    entries
+}
+
+fn toml_string_value(value: &'static str) -> Option<&'static str> {
+    value
+        .strip_prefix('"')?
+        .split_once('"')
+        .map(|(value, _)| value)
+}
+
+fn version_in_inclusive_range(version: &str, range: &str) -> bool {
+    let Some((start, end)) = range.split_once("..=") else {
+        return false;
+    };
+    compare_dotted_versions(version, start).is_some_and(|ordering| !ordering.is_lt())
+        && compare_dotted_versions(version, end).is_some_and(|ordering| !ordering.is_gt())
+}
+
+fn compare_dotted_versions(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let a = parse_dotted_version(a)?;
+    let b = parse_dotted_version(b)?;
+    Some(a.cmp(&b))
+}
+
+fn parse_dotted_version(version: &str) -> Option<Vec<u64>> {
+    version.split('.').map(|part| part.parse().ok()).collect()
 }
 
 fn read_session(
@@ -1005,7 +1126,11 @@ fn write_claude_plan(
             "aiTitle": plan.target_session.title,
             "sessionId": plan.target_session.id,
             "timestamp": iso_utc(plan.target_session.created_ms),
-            "version": plan.target.cli_version.as_deref().unwrap_or(DEFAULT_CLAUDE),
+            "version": plan
+                .target
+                .cli_version
+                .as_deref()
+                .unwrap_or_else(|| default_supported_version(ImportTool::Claude)),
             "sessiongator": provenance_json(&plan),
         })
     )?;
@@ -1061,7 +1186,11 @@ fn native_message_to_claude_event(
         "parentUuid": parent_uuid,
         "cwd": plan.target_session.cwd,
         "timestamp": iso_utc(message.created_ms),
-        "version": plan.target.cli_version.as_deref().unwrap_or(DEFAULT_CLAUDE),
+        "version": plan
+            .target
+            .cli_version
+            .as_deref()
+            .unwrap_or_else(|| default_supported_version(ImportTool::Claude)),
         "message": {
             "role": role,
             "model": plan.target_session.model.as_ref().map(|model| model.id.as_str()).unwrap_or("imported"),
@@ -1212,7 +1341,11 @@ fn write_opencode_transaction(
             slug(&plan.target_session.title),
             plan.target_session.cwd,
             plan.target_session.title,
-            plan.target.cli_version.as_deref().unwrap_or(SUPPORTED_OPENCODE),
+            plan
+                .target
+                .cli_version
+                .as_deref()
+                .unwrap_or_else(|| default_supported_version(ImportTool::Opencode)),
             plan.target_session.created_ms,
             plan.target_session.updated_ms,
             "imported",
@@ -1760,15 +1893,27 @@ mod tests {
 
     #[test]
     fn supports_observed_claude_versions() {
-        for version in SUPPORTED_CLAUDE {
+        for version in exact_supported_versions(ImportTool::Claude) {
             let tool_version = ToolVersion {
                 tool: ImportTool::Claude,
-                cli_version: Some((*version).to_string()),
+                cli_version: Some(version.to_string()),
                 store_version: None,
                 schema_fingerprint: Some("fixture".to_string()),
             };
             assert!(version_supported(&tool_version, true));
         }
+    }
+
+    #[test]
+    fn supports_observed_opencode_store_ranges() {
+        let tool_version = ToolVersion {
+            tool: ImportTool::Opencode,
+            cli_version: None,
+            store_version: Some("1.17.10".to_string()),
+            schema_fingerprint: Some("fixture".to_string()),
+        };
+        assert!(version_supported(&tool_version, false));
+        assert!(!version_supported(&tool_version, true));
     }
 
     #[test]
@@ -1877,13 +2022,13 @@ mod tests {
         let db = root.join("opencode.db");
         let source = ToolVersion {
             tool: ImportTool::Claude,
-            cli_version: Some(DEFAULT_CLAUDE.to_string()),
+            cli_version: Some(default_supported_version(ImportTool::Claude).to_string()),
             store_version: None,
             schema_fingerprint: Some("fixture".to_string()),
         };
         let target = ToolVersion {
             tool: ImportTool::Opencode,
-            cli_version: Some(SUPPORTED_OPENCODE.to_string()),
+            cli_version: Some(default_supported_version(ImportTool::Opencode).to_string()),
             store_version: None,
             schema_fingerprint: Some("fixture".to_string()),
         };
@@ -1891,7 +2036,7 @@ mod tests {
             &session,
             ImportTool::Opencode,
             Some("ses_fixture_import".to_string()),
-            Some(SUPPORTED_OPENCODE.to_string()),
+            Some(default_supported_version(ImportTool::Opencode).to_string()),
         );
         let plan = ConversionPlan {
             source,
@@ -1999,7 +2144,7 @@ mod tests {
     fn sample_plan(target_tool: ImportTool, target_id: &str) -> ConversionPlan {
         let source = ToolVersion {
             tool: ImportTool::Claude,
-            cli_version: Some(DEFAULT_CLAUDE.to_string()),
+            cli_version: Some(default_supported_version(ImportTool::Claude).to_string()),
             store_version: None,
             schema_fingerprint: Some("fixture".to_string()),
         };
@@ -2007,8 +2152,8 @@ mod tests {
             tool: target_tool,
             cli_version: Some(
                 match target_tool {
-                    ImportTool::Claude => DEFAULT_CLAUDE,
-                    ImportTool::Opencode => SUPPORTED_OPENCODE,
+                    ImportTool::Claude => default_supported_version(ImportTool::Claude),
+                    ImportTool::Opencode => default_supported_version(ImportTool::Opencode),
                 }
                 .to_string(),
             ),
@@ -2059,8 +2204,8 @@ mod tests {
             tool: source_session.tool,
             cli_version: Some(
                 match source_session.tool {
-                    ImportTool::Claude => DEFAULT_CLAUDE,
-                    ImportTool::Opencode => SUPPORTED_OPENCODE,
+                    ImportTool::Claude => default_supported_version(ImportTool::Claude),
+                    ImportTool::Opencode => default_supported_version(ImportTool::Opencode),
                 }
                 .to_string(),
             ),
@@ -2071,8 +2216,8 @@ mod tests {
             tool: target_tool,
             cli_version: Some(
                 match target_tool {
-                    ImportTool::Claude => DEFAULT_CLAUDE,
-                    ImportTool::Opencode => SUPPORTED_OPENCODE,
+                    ImportTool::Claude => default_supported_version(ImportTool::Claude),
+                    ImportTool::Opencode => default_supported_version(ImportTool::Opencode),
                 }
                 .to_string(),
             ),

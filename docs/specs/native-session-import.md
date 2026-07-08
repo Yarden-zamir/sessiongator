@@ -373,17 +373,17 @@ jobs:
 Daily CI responsibilities:
 
 - Install latest available tool versions where licensing/auth allows.
-- Generate fresh minimal sessions in isolated HOME/XDG dirs.
-- Run `sessiongator convert --dry-run --plan-json` in both directions.
+- Run fixture-backed conversions in isolated source and target stores with unsupported-version override enabled for the probe only.
 - Run fixture imports into isolated target stores.
 - Verify target tool can list/resume or at least parse/read back imported sessions without crashing.
 - Compare detected schemas against the known-version manifest.
-- If latest passes but is unknown, fail with a report that includes:
+- If latest passes but is unknown, update `docs/specs/native-session-import-versions.toml` and open a pull request that includes:
   - detected versions
   - schema fingerprint
   - fixture result summary
-  - exact manifest entry to add after review
+  - exact manifest entries added by CI
 - If known versions fail, fail hard.
+- Never commit new supported versions directly to `main`; native write compatibility changes must remain reviewable.
 
 ## Implementation Phases
 
@@ -407,7 +407,7 @@ Daily CI responsibilities:
 - Native target readback matches the conversion report for every fixture.
 - Live writes create backups and verify readback before success.
 - TUI conversion is available without breaking current resume/path/copy behavior.
-- Daily CI validates latest known tool versions and produces actionable reports for unknown passing versions.
+- Daily CI validates latest known tool versions and opens a reviewable manifest-update PR for unknown passing versions.
 
 ## Open Questions
 
