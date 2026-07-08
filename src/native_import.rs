@@ -13,7 +13,8 @@ use serde_json::{json, Value};
 
 use crate::model::{clean_title, now_ms, parse_iso_utc_ms};
 
-const SUPPORTED_CLAUDE: &str = "2.1.199";
+const DEFAULT_CLAUDE: &str = "2.1.203";
+const SUPPORTED_CLAUDE: &[&str] = &["2.1.199", DEFAULT_CLAUDE];
 const SUPPORTED_OPENCODE: &str = "1.17.13";
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -309,8 +310,8 @@ fn ensure_supported(
         return Ok(());
     }
     let known = match version.tool {
-        ImportTool::Claude => SUPPORTED_CLAUDE,
-        ImportTool::Opencode => SUPPORTED_OPENCODE,
+        ImportTool::Claude => SUPPORTED_CLAUDE.join(", "),
+        ImportTool::Opencode => SUPPORTED_OPENCODE.to_string(),
     };
     Err(format!(
         "unsupported {} {} version: {:?}; known supported version is {known}",
@@ -323,7 +324,10 @@ fn ensure_supported(
 
 fn version_supported(version: &ToolVersion, target: bool) -> bool {
     match version.tool {
-        ImportTool::Claude => version.cli_version.as_deref() == Some(SUPPORTED_CLAUDE),
+        ImportTool::Claude => version
+            .cli_version
+            .as_deref()
+            .is_some_and(|cli_version| SUPPORTED_CLAUDE.contains(&cli_version)),
         ImportTool::Opencode => {
             version.cli_version.as_deref() == Some(SUPPORTED_OPENCODE)
                 || (!target
@@ -1001,7 +1005,7 @@ fn write_claude_plan(
             "aiTitle": plan.target_session.title,
             "sessionId": plan.target_session.id,
             "timestamp": iso_utc(plan.target_session.created_ms),
-            "version": plan.target.cli_version.as_deref().unwrap_or(SUPPORTED_CLAUDE),
+            "version": plan.target.cli_version.as_deref().unwrap_or(DEFAULT_CLAUDE),
             "sessiongator": provenance_json(&plan),
         })
     )?;
@@ -1057,7 +1061,7 @@ fn native_message_to_claude_event(
         "parentUuid": parent_uuid,
         "cwd": plan.target_session.cwd,
         "timestamp": iso_utc(message.created_ms),
-        "version": plan.target.cli_version.as_deref().unwrap_or(SUPPORTED_CLAUDE),
+        "version": plan.target.cli_version.as_deref().unwrap_or(DEFAULT_CLAUDE),
         "message": {
             "role": role,
             "model": plan.target_session.model.as_ref().map(|model| model.id.as_str()).unwrap_or("imported"),
@@ -1755,6 +1759,19 @@ mod tests {
     }
 
     #[test]
+    fn supports_observed_claude_versions() {
+        for version in SUPPORTED_CLAUDE {
+            let tool_version = ToolVersion {
+                tool: ImportTool::Claude,
+                cli_version: Some((*version).to_string()),
+                store_version: None,
+                schema_fingerprint: Some("fixture".to_string()),
+            };
+            assert!(version_supported(&tool_version, true));
+        }
+    }
+
+    #[test]
     fn claude_parts_preserve_text_reasoning_and_tools() {
         let value: Value = serde_json::from_str(
             r#"{"content":[{"type":"text","text":"hello"},{"type":"thinking","thinking":"hidden","signature":"sig"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"a"}},{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}"#,
@@ -1860,7 +1877,7 @@ mod tests {
         let db = root.join("opencode.db");
         let source = ToolVersion {
             tool: ImportTool::Claude,
-            cli_version: Some(SUPPORTED_CLAUDE.to_string()),
+            cli_version: Some(DEFAULT_CLAUDE.to_string()),
             store_version: None,
             schema_fingerprint: Some("fixture".to_string()),
         };
@@ -1982,7 +1999,7 @@ mod tests {
     fn sample_plan(target_tool: ImportTool, target_id: &str) -> ConversionPlan {
         let source = ToolVersion {
             tool: ImportTool::Claude,
-            cli_version: Some(SUPPORTED_CLAUDE.to_string()),
+            cli_version: Some(DEFAULT_CLAUDE.to_string()),
             store_version: None,
             schema_fingerprint: Some("fixture".to_string()),
         };
@@ -1990,7 +2007,7 @@ mod tests {
             tool: target_tool,
             cli_version: Some(
                 match target_tool {
-                    ImportTool::Claude => SUPPORTED_CLAUDE,
+                    ImportTool::Claude => DEFAULT_CLAUDE,
                     ImportTool::Opencode => SUPPORTED_OPENCODE,
                 }
                 .to_string(),
@@ -2042,7 +2059,7 @@ mod tests {
             tool: source_session.tool,
             cli_version: Some(
                 match source_session.tool {
-                    ImportTool::Claude => SUPPORTED_CLAUDE,
+                    ImportTool::Claude => DEFAULT_CLAUDE,
                     ImportTool::Opencode => SUPPORTED_OPENCODE,
                 }
                 .to_string(),
@@ -2054,7 +2071,7 @@ mod tests {
             tool: target_tool,
             cli_version: Some(
                 match target_tool {
-                    ImportTool::Claude => SUPPORTED_CLAUDE,
+                    ImportTool::Claude => DEFAULT_CLAUDE,
                     ImportTool::Opencode => SUPPORTED_OPENCODE,
                 }
                 .to_string(),

@@ -23,6 +23,15 @@ required_fixtures = [
 notes = "Claude JSONL is not documented as a stable import API; live target writes require resume verification with claude -r."
 
 [[tools]]
+tool = "claude"
+version = "2.1.203"
+status = "target-supported"
+source = "local-sampling-and-dry-run-write"
+store = "jsonl-projects"
+fixture_root = "fixtures/native-import/claude/2.1.199"
+notes = "Local dry-run and isolated target-store write succeeded against the same projects JSONL layout as 2.1.199."
+
+[[tools]]
 tool = "opencode"
 version = "1.17.13"
 status = "target-supported"
