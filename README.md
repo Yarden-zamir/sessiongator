@@ -1,6 +1,8 @@
 # sessiongator
 
-Rust TUI browser for Claude Code and opencode sessions.
+🐊 Rust TUI browser for Claude Code and opencode sessions.
+
+Nerd Font is recommended for all gator-family CLIs so built-in icons render correctly.
 
 ## Install
 
