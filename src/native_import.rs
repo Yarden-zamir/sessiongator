@@ -23,6 +23,8 @@ static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 enum ImportTool {
     Claude,
     Opencode,
+    Codex,
+    Copilot,
 }
 
 impl ImportTool {
@@ -30,6 +32,8 @@ impl ImportTool {
         match value {
             "claude" => Ok(Self::Claude),
             "opencode" => Ok(Self::Opencode),
+            "codex" => Ok(Self::Codex),
+            "copilot" => Ok(Self::Copilot),
             _ => Err(format!("unknown tool: {value}")),
         }
     }
@@ -38,6 +42,8 @@ impl ImportTool {
         match self {
             Self::Claude => "claude",
             Self::Opencode => "opencode",
+            Self::Codex => "codex",
+            Self::Copilot => "copilot",
         }
     }
 }
@@ -198,7 +204,7 @@ pub fn run_convert(args: &[String]) -> AppResult<()> {
 }
 
 fn convert_usage() -> &'static str {
-    "Usage: sessiongator convert --id <id> --from <claude|opencode> --to <claude|opencode> [--dry-run] [--plan-json] [--report-json] [--source-store <path>] [--target-store <path>] [--target-id <id>] [--cwd <path>] [--title <title>] [--force] [--no-backup] [--allow-unsupported-version]"
+    "Usage: sessiongator convert --id <id> --from <claude|opencode|codex|copilot> --to <claude|opencode|codex|copilot> [--dry-run] [--plan-json] [--report-json] [--source-store <path>] [--target-store <path>] [--target-id <id>] [--cwd <path>] [--title <title>] [--force] [--no-backup] [--allow-unsupported-version]"
 }
 
 fn parse_convert_args(args: &[String]) -> Result<ConvertOptions, String> {
@@ -357,6 +363,8 @@ fn detect_version(
     let (store_version, schema_fingerprint) = match tool {
         ImportTool::Claude => (None, claude_schema_fingerprint(store)?),
         ImportTool::Opencode => opencode_store_version(store)?,
+        ImportTool::Codex => (None, codex_schema_fingerprint(store)?),
+        ImportTool::Copilot => copilot_store_version(store)?,
     };
     Ok(ToolVersion {
         tool,
@@ -371,10 +379,19 @@ fn command_version(tool: ImportTool) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .next()
-        .map(str::to_string)
+    parse_command_version(tool, &String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_command_version(tool: ImportTool, stdout: &str) -> Option<String> {
+    let tokens = stdout.split_whitespace().collect::<Vec<_>>();
+    match tool {
+        ImportTool::Codex if tokens.first() == Some(&"codex-cli") => tokens.get(1),
+        ImportTool::Copilot => tokens
+            .iter()
+            .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit())),
+        _ => tokens.first(),
+    }
+    .map(|token| token.trim_end_matches('.').to_string())
 }
 
 fn exact_version_supported(tool: ImportTool, version: &str) -> bool {
@@ -496,6 +513,8 @@ fn read_session(
     match tool {
         ImportTool::Claude => read_claude_session(store, id),
         ImportTool::Opencode => read_opencode_session(store, id),
+        ImportTool::Codex => read_codex_session(store, id),
+        ImportTool::Copilot => read_copilot_session(store, id),
     }
 }
 
@@ -1029,6 +1048,1086 @@ fn parse_opencode_model(raw: &str) -> Option<ModelRef> {
     }
 }
 
+fn codex_root(store: Option<&Path>) -> PathBuf {
+    store.map(Path::to_path_buf).unwrap_or_else(|| {
+        std::env::var("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home_dir().join(".codex"))
+    })
+}
+
+fn codex_source_roots(store: Option<&Path>) -> Vec<PathBuf> {
+    if let Some(store) = store {
+        return vec![store.to_path_buf()];
+    }
+    let mut roots = Vec::new();
+    if let Ok(root) = std::env::var("CODEX_HOME") {
+        roots.push(PathBuf::from(root));
+    }
+    roots.push(home_dir().join(".codex"));
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn codex_schema_fingerprint(
+    store: Option<&Path>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let mut jsonl = 0usize;
+    let mut has_index = false;
+    let mut has_state = false;
+    for root in codex_source_roots(store) {
+        count_jsonl_files(&root.join("sessions"), &mut jsonl)?;
+        count_jsonl_files(&root.join("archived_sessions"), &mut jsonl)?;
+        has_index |= root.join("session_index.jsonl").is_file();
+        has_state |= root.join("state_5.sqlite").is_file();
+    }
+    Ok(Some(format!(
+        "codex:sessions-jsonl:{jsonl};index:{has_index};state:{has_state}"
+    )))
+}
+
+fn count_jsonl_files(path: &Path, count: &mut usize) -> Result<(), Box<dyn std::error::Error>> {
+    if !path.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            count_jsonl_files(&path, count)?;
+        } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+            *count += 1;
+        }
+    }
+    Ok(())
+}
+
+fn read_codex_session(
+    store: Option<&Path>,
+    id: &str,
+) -> Result<NativeSession, Box<dyn std::error::Error>> {
+    let path = find_codex_session_file(store, id)
+        .ok_or_else(|| format!("codex session {id} not found"))?;
+    let file = fs::File::open(&path)?;
+    let mut title = None;
+    let mut cwd = None;
+    let mut created_ms = None;
+    let mut updated_ms = None;
+    let mut model = None;
+    let mut response_messages = Vec::new();
+    let mut event_messages = Vec::new();
+    let mut auxiliary_messages = Vec::new();
+    let mut response_first_user = None;
+    let mut event_first_user = None;
+    let mut metadata = BTreeMap::new();
+    metadata.insert("source_ref".to_string(), json!(path.display().to_string()));
+
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(meta) = codex_meta_value(&event) {
+            title = non_empty_string(meta.get("title")).or(title);
+            cwd = non_empty_string(meta.get("cwd")).or(cwd);
+            if let Some(version) = non_empty_string(meta.get("cli_version")) {
+                metadata.insert("codex_cli_version".to_string(), json!(version));
+            }
+            if let Some(provider) = non_empty_string(meta.get("model_provider")) {
+                metadata.insert("codex_model_provider".to_string(), json!(provider));
+            }
+            let timestamp = non_empty_string(meta.get("timestamp"))
+                .and_then(|value| parse_iso_utc_ms(&value))
+                .unwrap_or_else(now_ms);
+            created_ms = Some(created_ms.unwrap_or(timestamp));
+            updated_ms = Some(updated_ms.unwrap_or(timestamp));
+            continue;
+        }
+
+        if let Some((message, source)) = codex_message_from_event(&event) {
+            if created_ms.is_none() {
+                created_ms = Some(message.created_ms);
+            }
+            updated_ms = Some(message.updated_ms.unwrap_or(message.created_ms));
+            if model.is_none() {
+                model = event
+                    .get("payload")
+                    .and_then(|payload| payload.get("model"))
+                    .and_then(model_ref_from_json)
+                    .or_else(|| event.get("model").and_then(model_ref_from_json));
+            }
+            match source {
+                CodexReadSource::ResponseVisible | CodexReadSource::Sessiongator => {
+                    if response_first_user.is_none() && message.role == NativeRole::User {
+                        response_first_user = first_text_part(&message.parts)
+                            .map(|value| clean_title(&value.chars().take(120).collect::<String>()));
+                    }
+                    response_messages.push(message);
+                }
+                CodexReadSource::ResponseAuxiliary => auxiliary_messages.push(message),
+                CodexReadSource::EventMsg => {
+                    if event_first_user.is_none() && message.role == NativeRole::User {
+                        event_first_user = first_text_part(&message.parts)
+                            .map(|value| clean_title(&value.chars().take(120).collect::<String>()));
+                    }
+                    event_messages.push(message);
+                }
+            }
+        }
+    }
+
+    let updated = updated_ms.or(created_ms).unwrap_or_else(now_ms);
+    let mut messages = if event_messages.is_empty() {
+        response_messages
+    } else {
+        event_messages
+    };
+    messages.extend(auxiliary_messages);
+    messages.sort_by_key(|message| message.created_ms);
+    let fallback_title = event_first_user.or(response_first_user);
+    Ok(NativeSession {
+        tool: ImportTool::Codex,
+        id: id.to_string(),
+        title: title
+            .or(fallback_title)
+            .unwrap_or_else(|| "(imported session)".to_string()),
+        cwd: cwd.unwrap_or_default(),
+        created_ms: created_ms.unwrap_or(updated),
+        updated_ms: updated,
+        model,
+        messages,
+        metadata,
+    })
+}
+
+fn find_codex_session_file(store: Option<&Path>, id: &str) -> Option<PathBuf> {
+    codex_source_roots(store).into_iter().find_map(|root| {
+        find_jsonl_session_file(&root.join("sessions"), id)
+            .or_else(|| find_jsonl_session_file(&root.join("archived_sessions"), id))
+    })
+}
+
+fn find_jsonl_session_file(root: &Path, id: &str) -> Option<PathBuf> {
+    if !root.is_dir() {
+        return None;
+    }
+    for entry in fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_jsonl_session_file(&path, id) {
+                return Some(found);
+            }
+            continue;
+        }
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains(id))
+            || jsonl_file_mentions_session_id(&path, id)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn jsonl_file_mentions_session_id(path: &Path, id: &str) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    for line in BufReader::new(file).lines().map_while(Result::ok).take(5) {
+        if line.contains(id) {
+            return true;
+        }
+    }
+    false
+}
+
+#[derive(Clone, Copy)]
+enum CodexReadSource {
+    ResponseVisible,
+    ResponseAuxiliary,
+    EventMsg,
+    Sessiongator,
+}
+
+fn codex_meta_value(event: &Value) -> Option<&Value> {
+    if event.get("type").and_then(Value::as_str) == Some("session_meta") {
+        return Some(event.get("payload").unwrap_or(event));
+    }
+    let item = event.get("item").unwrap_or(event);
+    match item.get("type").and_then(Value::as_str) {
+        Some("session_meta" | "SessionMeta" | "session_meta_line") => {
+            Some(item.get("meta").unwrap_or(item))
+        }
+        _ => None,
+    }
+}
+
+fn codex_message_from_event(event: &Value) -> Option<(NativeMessage, CodexReadSource)> {
+    let timestamp = event_timestamp_ms(event).unwrap_or_else(now_ms);
+    if event.get("type").and_then(Value::as_str) == Some("response_item") {
+        let payload = event.get("payload")?;
+        return codex_response_item_message(payload, timestamp);
+    }
+
+    if event.get("type").and_then(Value::as_str) == Some("event_msg") {
+        let payload = event.get("payload")?;
+        let (role, text) = match payload.get("type").and_then(Value::as_str) {
+            Some("user_message") => (NativeRole::User, non_empty_string(payload.get("message"))),
+            Some("agent_message") => (
+                NativeRole::Assistant,
+                non_empty_string(payload.get("message")),
+            ),
+            _ => return None,
+        };
+        return text.map(|text| {
+            (
+                NativeMessage {
+                    role,
+                    created_ms: timestamp,
+                    updated_ms: None,
+                    parts: vec![NativePart::Text(text)],
+                    metadata: BTreeMap::new(),
+                },
+                CodexReadSource::EventMsg,
+            )
+        });
+    }
+
+    let item = event.get("item").unwrap_or(event);
+    native_message_from_event(item).map(|message| (message, CodexReadSource::Sessiongator))
+}
+
+fn codex_response_item_message(
+    payload: &Value,
+    timestamp: i64,
+) -> Option<(NativeMessage, CodexReadSource)> {
+    match payload.get("type").and_then(Value::as_str)? {
+        "message" => {
+            let role = match payload.get("role").and_then(Value::as_str)? {
+                "user" => NativeRole::User,
+                "assistant" => NativeRole::Assistant,
+                _ => return None,
+            };
+            let parts = codex_response_parts(payload.get("content"));
+            (!parts.is_empty()).then(|| {
+                (
+                    NativeMessage {
+                        role,
+                        created_ms: timestamp,
+                        updated_ms: None,
+                        parts,
+                        metadata: BTreeMap::new(),
+                    },
+                    CodexReadSource::ResponseVisible,
+                )
+            })
+        }
+        "function_call" => Some((
+            NativeMessage {
+                role: NativeRole::Assistant,
+                created_ms: timestamp,
+                updated_ms: None,
+                parts: vec![NativePart::ToolCall {
+                    id: non_empty_string(payload.get("call_id"))
+                        .unwrap_or_else(|| generated_id("tool")),
+                    name: non_empty_string(payload.get("name"))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    input: payload
+                        .get("arguments")
+                        .and_then(|arguments| {
+                            serde_json::from_str::<Value>(arguments.as_str().unwrap_or("{}")).ok()
+                        })
+                        .unwrap_or_else(|| {
+                            payload.get("arguments").cloned().unwrap_or(Value::Null)
+                        }),
+                }],
+                metadata: BTreeMap::new(),
+            },
+            CodexReadSource::ResponseAuxiliary,
+        )),
+        "function_call_output" => Some((
+            NativeMessage {
+                role: NativeRole::User,
+                created_ms: timestamp,
+                updated_ms: None,
+                parts: vec![NativePart::ToolResult {
+                    id: non_empty_string(payload.get("call_id"))
+                        .unwrap_or_else(|| generated_id("tool")),
+                    content: payload.get("output").cloned().unwrap_or(Value::Null),
+                    is_error: false,
+                }],
+                metadata: BTreeMap::new(),
+            },
+            CodexReadSource::ResponseAuxiliary,
+        )),
+        "reasoning" => {
+            let text = codex_reasoning_text(payload)?;
+            Some((
+                NativeMessage {
+                    role: NativeRole::Assistant,
+                    created_ms: timestamp,
+                    updated_ms: None,
+                    parts: vec![NativePart::Reasoning {
+                        text,
+                        metadata: payload
+                            .get("summary")
+                            .cloned()
+                            .map(|summary| json!({ "summary": summary })),
+                    }],
+                    metadata: BTreeMap::new(),
+                },
+                CodexReadSource::ResponseAuxiliary,
+            ))
+        }
+        "web_search_call" => Some((
+            NativeMessage {
+                role: NativeRole::Assistant,
+                created_ms: timestamp,
+                updated_ms: None,
+                parts: vec![NativePart::ToolCall {
+                    id: generated_id("tool"),
+                    name: "web_search".to_string(),
+                    input: payload.get("action").cloned().unwrap_or(Value::Null),
+                }],
+                metadata: BTreeMap::new(),
+            },
+            CodexReadSource::ResponseAuxiliary,
+        )),
+        other => Some((
+            NativeMessage {
+                role: NativeRole::Unknown(other.to_string()),
+                created_ms: timestamp,
+                updated_ms: None,
+                parts: vec![NativePart::Raw {
+                    kind: other.to_string(),
+                    value: payload.clone(),
+                }],
+                metadata: BTreeMap::new(),
+            },
+            CodexReadSource::ResponseAuxiliary,
+        )),
+    }
+}
+
+fn codex_reasoning_text(payload: &Value) -> Option<String> {
+    let summary_text = payload
+        .get("summary")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| non_empty_string(item.get("text")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !summary_text.is_empty() {
+        return Some(summary_text);
+    }
+    let content_text = payload
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| non_empty_string(item.get("text")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!content_text.is_empty()).then_some(content_text)
+}
+
+fn codex_response_parts(value: Option<&Value>) -> Vec<NativePart> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+            Some("input_text" | "output_text" | "text") => {
+                non_empty_string(part.get("text")).map(NativePart::Text)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn event_timestamp_ms(event: &Value) -> Option<i64> {
+    event.get("created_ms").and_then(Value::as_i64).or_else(|| {
+        non_empty_string(event.get("timestamp")).and_then(|value| parse_iso_utc_ms(&value))
+    })
+}
+
+fn write_codex_plan(
+    options: &ConvertOptions,
+    plan: ConversionPlan,
+) -> Result<WriteReceipt, Box<dyn std::error::Error>> {
+    let root = codex_root(options.target_store.as_deref());
+    let sessions_dir = codex_session_day_dir(&root, plan.target_session.created_ms);
+    fs::create_dir_all(&sessions_dir)?;
+    let path = sessions_dir.join(format!(
+        "rollout-{}-{}.jsonl",
+        codex_filename_timestamp(plan.target_session.created_ms),
+        plan.target_session.id
+    ));
+    if path.exists() && !options.force {
+        return Err(format!("target Codex session already exists: {}", path.display()).into());
+    }
+    let tmp = path.with_extension("jsonl.tmp");
+    let mut file = fs::File::create(&tmp)?;
+    writeln!(file, "{}", codex_session_meta_json(&plan))?;
+    for message in &plan.target_session.messages {
+        writeln!(
+            file,
+            "{}",
+            native_message_event_json("message", message, &plan.target_session)
+        )?;
+    }
+    file.flush()?;
+    fs::rename(&tmp, &path)?;
+    append_codex_session_index(&root, &plan.target_session)?;
+    Ok(WriteReceipt {
+        target_id: plan.target_session.id.clone(),
+        target_ref: path.display().to_string(),
+        backup: None,
+        report: plan,
+    })
+}
+
+fn codex_session_day_dir(root: &Path, epoch_ms: i64) -> PathBuf {
+    let secs = epoch_ms.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    root.join("sessions")
+        .join(format!("{year:04}"))
+        .join(format!("{month:02}"))
+        .join(format!("{day:02}"))
+}
+
+fn codex_filename_timestamp(epoch_ms: i64) -> String {
+    let iso = iso_utc(epoch_ms);
+    iso.split('.').next().unwrap_or(&iso).replace(':', "-")
+}
+
+fn codex_session_meta_json(plan: &ConversionPlan) -> Value {
+    json!({
+        "item": {
+            "type": "session_meta",
+            "meta": {
+                "id": plan.target_session.id,
+                "session_id": plan.target_session.id,
+                "timestamp": iso_utc(plan.target_session.created_ms),
+                "cwd": plan.target_session.cwd,
+                "title": plan.target_session.title,
+                "originator": "sessiongator",
+                "cli_version": plan.target.cli_version.as_deref().unwrap_or_else(|| default_supported_version(ImportTool::Codex)),
+                "model_provider": plan.target_session.model.as_ref().and_then(|model| model.provider_id.as_deref()).unwrap_or("imported"),
+                "source": "Cli",
+                "history_mode": "legacy"
+            }
+        },
+        "sessiongator": provenance_json(plan),
+    })
+}
+
+fn append_codex_session_index(
+    root: &Path,
+    session: &NativeSession,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(root)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("session_index.jsonl"))?;
+    writeln!(
+        file,
+        "{}",
+        json!({ "id": session.id, "thread_name": session.title, "updated_at": iso_utc(session.updated_ms) })
+    )?;
+    file.flush()?;
+    Ok(())
+}
+
+fn copilot_root(store: Option<&Path>) -> PathBuf {
+    store.map(Path::to_path_buf).unwrap_or_else(|| {
+        std::env::var("COPILOT_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home_dir().join(".copilot"))
+    })
+}
+
+fn copilot_store_version(
+    store: Option<&Path>,
+) -> Result<(Option<String>, Option<String>), Box<dyn std::error::Error>> {
+    let path = copilot_root(store).join("session-store.db");
+    if !path.is_file() {
+        return Ok((None, None));
+    }
+    let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let store_version = if table_exists(&connection, "schema_version")? {
+        connection
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?
+            .map(|version| version.to_string())
+    } else {
+        None
+    };
+    let fingerprint = sqlite_schema_fingerprint(&connection)?;
+    Ok((store_version, Some(short_hash(&fingerprint))))
+}
+
+fn sqlite_schema_fingerprint(
+    connection: &Connection,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut statement = connection.prepare(
+        "SELECT m.name, p.name, p.type, p.[notnull]
+         FROM sqlite_master m JOIN pragma_table_info(m.name) p
+         WHERE m.type IN ('table', 'virtual table')
+         ORDER BY m.name, p.cid",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(format!(
+            "{}:{}:{}:{}",
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?
+        ))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?.join("|"))
+}
+
+fn read_copilot_session(
+    store: Option<&Path>,
+    id: &str,
+) -> Result<NativeSession, Box<dyn std::error::Error>> {
+    let root = copilot_root(store);
+    let db = root.join("session-store.db");
+    let mut title = None;
+    let mut cwd = None;
+    let mut created_ms = None;
+    let mut updated_ms = None;
+    let mut messages = Vec::new();
+    let mut metadata = BTreeMap::new();
+    metadata.insert("source_ref".to_string(), json!(root.display().to_string()));
+
+    if db.is_file() {
+        let connection = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        if table_exists(&connection, "sessions")? {
+            if let Some((session_cwd, summary, created, updated, repository, branch)) = connection
+                .query_row(
+                    "SELECT cwd, summary, created_at, updated_at, repository, branch FROM sessions WHERE id = ?1",
+                    [id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ))
+                    },
+                )
+                .optional()?
+            {
+                cwd = session_cwd;
+                title = summary;
+                created_ms = created.and_then(|value| parse_flexible_time_ms(&value));
+                updated_ms = updated.and_then(|value| parse_flexible_time_ms(&value));
+                if let Some(repository) = repository {
+                    metadata.insert("repository".to_string(), json!(repository));
+                }
+                if let Some(branch) = branch {
+                    metadata.insert("branch".to_string(), json!(branch));
+                }
+            }
+        }
+        if table_exists(&connection, "turns")? {
+            messages.extend(read_copilot_turns(&connection, id)?);
+        }
+    }
+
+    let event_path = root.join("session-state").join(id).join("events.jsonl");
+    if event_path.is_file() {
+        let event_messages = read_sessiongator_events(&event_path)?;
+        if !event_messages.is_empty() {
+            messages = event_messages;
+        }
+    }
+
+    for message in &messages {
+        if created_ms.is_none() {
+            created_ms = Some(message.created_ms);
+        }
+        updated_ms = Some(message.updated_ms.unwrap_or(message.created_ms));
+        if title.is_none() && message.role == NativeRole::User {
+            title = first_text_part(&message.parts)
+                .map(|value| clean_title(&value.chars().take(120).collect::<String>()));
+        }
+    }
+
+    let updated = updated_ms.or(created_ms).unwrap_or_else(now_ms);
+    Ok(NativeSession {
+        tool: ImportTool::Copilot,
+        id: id.to_string(),
+        title: title.unwrap_or_else(|| "(imported session)".to_string()),
+        cwd: cwd.unwrap_or_default(),
+        created_ms: created_ms.unwrap_or(updated),
+        updated_ms: updated,
+        model: None,
+        messages,
+        metadata,
+    })
+}
+
+fn read_copilot_turns(
+    connection: &Connection,
+    id: &str,
+) -> Result<Vec<NativeMessage>, Box<dyn std::error::Error>> {
+    let mut statement = connection.prepare(
+        "SELECT turn_index, user_message, assistant_response, timestamp FROM turns WHERE session_id = ?1 ORDER BY turn_index",
+    )?;
+    let rows = statement.query_map([id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut messages = Vec::new();
+    for row in rows {
+        let (index, user, assistant, timestamp) = row?;
+        let created = timestamp
+            .and_then(|value| parse_flexible_time_ms(&value))
+            .unwrap_or_else(now_ms);
+        if let Some(user) = user.filter(|value| !value.is_empty()) {
+            messages.push(NativeMessage {
+                role: NativeRole::User,
+                created_ms: created + index * 2,
+                updated_ms: None,
+                parts: vec![NativePart::Text(user)],
+                metadata: BTreeMap::new(),
+            });
+        }
+        if let Some(assistant) = assistant.filter(|value| !value.is_empty()) {
+            messages.push(NativeMessage {
+                role: NativeRole::Assistant,
+                created_ms: created + index * 2 + 1,
+                updated_ms: None,
+                parts: vec![NativePart::Text(assistant)],
+                metadata: BTreeMap::new(),
+            });
+        }
+    }
+    Ok(messages)
+}
+
+fn write_copilot_plan(
+    options: &ConvertOptions,
+    plan: ConversionPlan,
+) -> Result<WriteReceipt, Box<dyn std::error::Error>> {
+    let root = copilot_root(options.target_store.as_deref());
+    fs::create_dir_all(&root)?;
+    let session_root = root.join("session-state").join(&plan.target_session.id);
+    if session_root.exists() && !options.force {
+        return Err(format!(
+            "target Copilot session already exists: {}",
+            session_root.display()
+        )
+        .into());
+    }
+    fs::create_dir_all(&session_root)?;
+    write_sessiongator_events(
+        &session_root.join("events.jsonl"),
+        "copilot",
+        &plan.target_session,
+    )?;
+    write_copilot_workspace(&session_root.join("workspace.yaml"), &plan.target_session)?;
+    write_copilot_session_db(&session_root.join("session.db"))?;
+    write_copilot_store(&root.join("session-store.db"), options, &plan)?;
+    Ok(WriteReceipt {
+        target_id: plan.target_session.id.clone(),
+        target_ref: session_root.display().to_string(),
+        backup: None,
+        report: plan,
+    })
+}
+
+fn write_copilot_workspace(
+    path: &Path,
+    session: &NativeSession,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = fs::File::create(path)?;
+    writeln!(file, "cwd: {}", session.cwd)?;
+    writeln!(file, "summary: {}", session.title)?;
+    file.flush()?;
+    Ok(())
+}
+
+fn write_copilot_session_db(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let connection = Connection::open(path)?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS todos (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'in_progress', 'done', 'blocked')), created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS todo_deps (todo_id TEXT NOT NULL, depends_on TEXT NOT NULL, PRIMARY KEY (todo_id, depends_on), FOREIGN KEY (todo_id) REFERENCES todos(id), FOREIGN KEY (depends_on) REFERENCES todos(id));
+        CREATE TABLE IF NOT EXISTS inbox_entries (id TEXT PRIMARY KEY, recipient_session_id TEXT NOT NULL, sender_id TEXT NOT NULL, sender_name TEXT NOT NULL, sender_type TEXT NOT NULL, interaction_id TEXT NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL, content TEXT NOT NULL, unread INTEGER NOT NULL DEFAULT 1, sent_at INTEGER NOT NULL, read_at INTEGER, notified_at INTEGER);
+        "#,
+    )?;
+    Ok(())
+}
+
+fn write_copilot_store(
+    path: &Path,
+    options: &ConvertOptions,
+    plan: &ConversionPlan,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let connection = Connection::open(path)?;
+    create_copilot_schema_if_missing(&connection)?;
+    connection.execute_batch("BEGIN IMMEDIATE;")?;
+    let result = write_copilot_store_transaction(&connection, options, plan);
+    match result {
+        Ok(()) => connection.execute_batch("COMMIT;")?,
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK;");
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn create_copilot_schema_if_missing(
+    connection: &Connection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, cwd TEXT, repository TEXT, host_type TEXT, branch TEXT, summary TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS turns (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), turn_index INTEGER NOT NULL, user_message TEXT, assistant_response TEXT, timestamp TEXT DEFAULT (datetime('now')), UNIQUE(session_id, turn_index));
+        CREATE TABLE IF NOT EXISTS checkpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), checkpoint_number INTEGER NOT NULL, title TEXT, overview TEXT, history TEXT, work_done TEXT, technical_details TEXT, important_files TEXT, next_steps TEXT, created_at TEXT DEFAULT (datetime('now')), UNIQUE(session_id, checkpoint_number));
+        CREATE TABLE IF NOT EXISTS session_files (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), file_path TEXT NOT NULL, tool_name TEXT, turn_index INTEGER, first_seen_at TEXT DEFAULT (datetime('now')), UNIQUE(session_id, file_path));
+        CREATE TABLE IF NOT EXISTS session_refs (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), ref_type TEXT NOT NULL, ref_value TEXT NOT NULL, turn_index INTEGER, created_at TEXT DEFAULT (datetime('now')), UNIQUE(session_id, ref_type, ref_value));
+        "#,
+    )?;
+    let count: i64 =
+        connection.query_row("SELECT count(*) FROM schema_version", [], |row| row.get(0))?;
+    if count == 0 {
+        connection.execute("INSERT INTO schema_version (version) VALUES (1)", [])?;
+    }
+    Ok(())
+}
+
+fn write_copilot_store_transaction(
+    connection: &Connection,
+    options: &ConvertOptions,
+    plan: &ConversionPlan,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let existing: Option<String> = connection
+        .query_row(
+            "SELECT id FROM sessions WHERE id = ?1",
+            [plan.target_session.id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if existing.is_some() {
+        if !options.force {
+            return Err(format!(
+                "target Copilot session already exists: {}",
+                plan.target_session.id
+            )
+            .into());
+        }
+        connection.execute(
+            "DELETE FROM turns WHERE session_id = ?1",
+            [plan.target_session.id.as_str()],
+        )?;
+        connection.execute(
+            "DELETE FROM sessions WHERE id = ?1",
+            [plan.target_session.id.as_str()],
+        )?;
+    }
+    connection.execute(
+        "INSERT INTO sessions (id, cwd, repository, host_type, branch, summary, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            plan.target_session.id,
+            plan.target_session.cwd,
+            plan.target_session.cwd,
+            "local",
+            plan.target_session.metadata.get("gitBranch").and_then(Value::as_str),
+            plan.target_session.title,
+            iso_utc(plan.target_session.created_ms),
+            iso_utc(plan.target_session.updated_ms),
+        ],
+    )?;
+    for (turn, chunk) in plan.target_session.messages.chunks(2).enumerate() {
+        let user = chunk
+            .iter()
+            .find(|message| message.role == NativeRole::User)
+            .map(|message| parts_text(&message.parts));
+        let assistant = chunk
+            .iter()
+            .find(|message| message.role == NativeRole::Assistant)
+            .map(|message| parts_text(&message.parts));
+        connection.execute(
+            "INSERT INTO turns (session_id, turn_index, user_message, assistant_response, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![plan.target_session.id, turn as i64, user, assistant, iso_utc(chunk[0].created_ms)],
+        )?;
+    }
+    Ok(())
+}
+
+fn write_sessiongator_events(
+    path: &Path,
+    tool: &str,
+    session: &NativeSession,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = fs::File::create(path)?;
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "type": "session_meta",
+            "tool": tool,
+            "id": session.id,
+            "title": session.title,
+            "cwd": session.cwd,
+            "created_ms": session.created_ms,
+            "updated_ms": session.updated_ms,
+            "model": session.model.as_ref().map(model_json),
+        })
+    )?;
+    for message in &session.messages {
+        writeln!(
+            file,
+            "{}",
+            native_message_event_json("message", message, session)
+        )?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
+fn read_sessiongator_events(path: &Path) -> Result<Vec<NativeMessage>, Box<dyn std::error::Error>> {
+    let file = fs::File::open(path)?;
+    let mut messages = Vec::new();
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(message) = native_message_from_event(&event) {
+            messages.push(message);
+        }
+    }
+    Ok(messages)
+}
+
+fn native_message_event_json(
+    kind: &str,
+    message: &NativeMessage,
+    session: &NativeSession,
+) -> Value {
+    json!({
+        "type": kind,
+        "role": native_role_name(&message.role),
+        "created_ms": message.created_ms,
+        "updated_ms": message.updated_ms,
+        "parts": native_parts_to_json(&message.parts),
+        "metadata": message.metadata,
+        "model": session.model.as_ref().map(model_json),
+    })
+}
+
+fn native_message_from_event(value: &Value) -> Option<NativeMessage> {
+    if matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("user.message" | "assistant.message")
+    ) {
+        let role = match value.get("type").and_then(Value::as_str)? {
+            "user.message" => NativeRole::User,
+            "assistant.message" => NativeRole::Assistant,
+            _ => return None,
+        };
+        let text = value
+            .get("data")
+            .and_then(|data| {
+                data.get("transformedContent")
+                    .or_else(|| data.get("content"))
+            })
+            .and_then(value_text_content)?;
+        return Some(NativeMessage {
+            role,
+            created_ms: event_timestamp_ms(value).unwrap_or_else(now_ms),
+            updated_ms: None,
+            parts: vec![NativePart::Text(text)],
+            metadata: BTreeMap::new(),
+        });
+    }
+
+    if let Some(message) = copilot_tool_or_control_message(value) {
+        return Some(message);
+    }
+
+    if value.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    Some(NativeMessage {
+        role: native_role_from_name(value.get("role")?.as_str()?),
+        created_ms: value
+            .get("created_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(now_ms),
+        updated_ms: value.get("updated_ms").and_then(Value::as_i64),
+        parts: value
+            .get("parts")
+            .and_then(native_parts_from_json)
+            .unwrap_or_default(),
+        metadata: value
+            .get("metadata")
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+fn copilot_tool_or_control_message(value: &Value) -> Option<NativeMessage> {
+    let timestamp = event_timestamp_ms(value).unwrap_or_else(now_ms);
+    let data = value.get("data").unwrap_or(value);
+    match value.get("type").and_then(Value::as_str)? {
+        "tool.execution_start" => Some(NativeMessage {
+            role: NativeRole::Assistant,
+            created_ms: timestamp,
+            updated_ms: None,
+            parts: vec![NativePart::ToolCall {
+                id: non_empty_string(data.get("toolCallId"))
+                    .unwrap_or_else(|| generated_id("tool")),
+                name: non_empty_string(data.get("toolName"))
+                    .or_else(|| non_empty_string(data.get("mcpToolName")))
+                    .unwrap_or_else(|| "unknown".to_string()),
+                input: data.get("arguments").cloned().unwrap_or(Value::Null),
+            }],
+            metadata: BTreeMap::new(),
+        }),
+        "tool.execution_complete" => Some(NativeMessage {
+            role: NativeRole::User,
+            created_ms: timestamp,
+            updated_ms: None,
+            parts: vec![NativePart::ToolResult {
+                id: non_empty_string(data.get("toolCallId"))
+                    .unwrap_or_else(|| generated_id("tool")),
+                content: data
+                    .get("result")
+                    .or_else(|| data.get("error"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                is_error: data.get("success").and_then(Value::as_bool) == Some(false),
+            }],
+            metadata: BTreeMap::new(),
+        }),
+        "permission.requested" => Some(NativeMessage {
+            role: NativeRole::System,
+            created_ms: timestamp,
+            updated_ms: None,
+            parts: vec![NativePart::Text(copilot_permission_text(data))],
+            metadata: BTreeMap::new(),
+        }),
+        "assistant.turn_end" => None,
+        "session.shutdown" => data.get("conversationTokens").map(|_| NativeMessage {
+            role: NativeRole::Compaction,
+            created_ms: timestamp,
+            updated_ms: None,
+            parts: vec![NativePart::Text(copilot_shutdown_text(data))],
+            metadata: BTreeMap::new(),
+        }),
+        _ => None,
+    }
+}
+
+fn copilot_permission_text(data: &Value) -> String {
+    let request = data
+        .get("permissionRequest")
+        .or_else(|| data.get("promptRequest"))
+        .map(Value::to_string)
+        .unwrap_or_else(|| "{}".to_string());
+    format!("permission requested {request}")
+}
+
+fn copilot_shutdown_text(data: &Value) -> String {
+    let shutdown =
+        non_empty_string(data.get("shutdownType")).unwrap_or_else(|| "unknown".to_string());
+    let tokens = data
+        .get("conversationTokens")
+        .map(Value::to_string)
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("session shutdown: {shutdown}; conversationTokens={tokens}")
+}
+
+fn value_text_content(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str().filter(|text| !text.is_empty()) {
+        return Some(text.to_string());
+    }
+    let text = value
+        .as_array()?
+        .iter()
+        .filter_map(|item| {
+            item.get("text")
+                .or_else(|| item.get("content"))
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn native_role_name(role: &NativeRole) -> &str {
+    match role {
+        NativeRole::System => "system",
+        NativeRole::User => "user",
+        NativeRole::Assistant => "assistant",
+        NativeRole::Shell => "shell",
+        NativeRole::Compaction => "compaction",
+        NativeRole::Unknown(value) => value,
+    }
+}
+
+fn native_role_from_name(value: &str) -> NativeRole {
+    match value {
+        "system" => NativeRole::System,
+        "user" => NativeRole::User,
+        "assistant" => NativeRole::Assistant,
+        "shell" => NativeRole::Shell,
+        "compaction" => NativeRole::Compaction,
+        other => NativeRole::Unknown(other.to_string()),
+    }
+}
+
+fn model_ref_from_json(value: &Value) -> Option<ModelRef> {
+    Some(ModelRef {
+        provider_id: value
+            .get("providerID")
+            .or_else(|| value.get("provider_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        id: value
+            .get("id")
+            .or_else(|| value.get("modelID"))
+            .and_then(Value::as_str)?
+            .to_string(),
+    })
+}
+
+fn parse_flexible_time_ms(value: &str) -> Option<i64> {
+    parse_iso_utc_ms(value).or_else(|| parse_iso_utc_ms(&format!("{value}Z")))
+}
+
 fn map_session(
     source: &NativeSession,
     target_tool: ImportTool,
@@ -1054,6 +2153,7 @@ fn map_session(
     let id = target_id.unwrap_or_else(|| match target_tool {
         ImportTool::Claude => generated_uuid(),
         ImportTool::Opencode => generated_id("ses"),
+        ImportTool::Codex | ImportTool::Copilot => generated_uuid(),
     });
     let mut metadata = source.metadata.clone();
     metadata.insert("imported_from_tool".to_string(), json!(source.tool.name()));
@@ -1101,6 +2201,8 @@ fn write_plan(
     match options.to {
         ImportTool::Claude => write_claude_plan(options, plan),
         ImportTool::Opencode => write_opencode_plan(options, plan),
+        ImportTool::Codex => write_codex_plan(options, plan),
+        ImportTool::Copilot => write_copilot_plan(options, plan),
     }
 }
 
@@ -2005,6 +3107,197 @@ mod tests {
     }
 
     #[test]
+    fn writes_codex_session_to_isolated_store_and_reads_back() {
+        let root = temp_path("codex-write");
+        let _ = fs::remove_dir_all(&root);
+        let options = convert_options(ImportTool::Claude, ImportTool::Codex, Some(root.clone()));
+        let plan = sample_plan(ImportTool::Codex, "33333333-4444-4555-8666-777777777777");
+        let receipt = write_codex_plan(&options, plan).unwrap();
+        assert!(PathBuf::from(&receipt.target_ref).is_file());
+        assert!(root.join("session_index.jsonl").is_file());
+        let readback =
+            read_codex_session(Some(&root), "33333333-4444-4555-8666-777777777777").unwrap();
+        assert_eq!(readback.title, "Imported Demo");
+        assert_eq!(readback.cwd, "/tmp/sessiongator-demo");
+        assert_eq!(readback.messages.len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn writes_copilot_session_to_isolated_store_and_reads_back() {
+        let root = temp_path("copilot-write");
+        let _ = fs::remove_dir_all(&root);
+        let options = convert_options(ImportTool::Claude, ImportTool::Copilot, Some(root.clone()));
+        let plan = sample_plan(ImportTool::Copilot, "44444444-5555-4666-8777-888888888888");
+        let receipt = write_copilot_plan(&options, plan).unwrap();
+        assert!(PathBuf::from(&receipt.target_ref).is_dir());
+        assert!(root.join("session-store.db").is_file());
+        let readback =
+            read_copilot_session(Some(&root), "44444444-5555-4666-8777-888888888888").unwrap();
+        assert_eq!(readback.title, "Imported Demo");
+        assert_eq!(readback.cwd, "/tmp/sessiongator-demo");
+        assert_eq!(readback.messages.len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_native_codex_response_items_for_conversion() {
+        let root = temp_path("codex-native-read");
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("sessions/2026/07/03");
+        fs::create_dir_all(&dir).unwrap();
+        let id = "99999999-aaaa-4bbb-8ccc-000000000099";
+        fs::write(
+            dir.join(format!("rollout-2026-07-03T10-00-01-{id}.jsonl")),
+            [
+                format!(r#"{{"type":"session_meta","timestamp":"2026-07-03T10:00:01.000Z","payload":{{"id":"{id}","cwd":"/tmp/native-codex","timestamp":"2026-07-03T10:00:01.000Z","cli_version":"0.143.0","model_provider":"openai"}}}}"#),
+                r#"{"type":"event_msg","timestamp":"2026-07-03T10:00:01.100Z","payload":{"type":"user_message","message":"visible user"}}"#.to_string(),
+                r#"{"type":"response_item","timestamp":"2026-07-03T10:00:01.100Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"native user"}]}}"#.to_string(),
+                r#"{"type":"event_msg","timestamp":"2026-07-03T10:00:02.100Z","payload":{"type":"agent_message","message":"visible assistant"}}"#.to_string(),
+                r#"{"type":"response_item","timestamp":"2026-07-03T10:00:02.100Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"native assistant"}]}}"#.to_string(),
+                r#"{"type":"response_item","timestamp":"2026-07-03T10:00:03.100Z","payload":{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{\"cmd\":\"ls\"}"}}"#.to_string(),
+                r#"{"type":"response_item","timestamp":"2026-07-03T10:00:04.100Z","payload":{"type":"function_call_output","call_id":"call_1","output":"ok"}}"#.to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let session = read_codex_session(Some(&root), id).unwrap();
+        assert_eq!(session.cwd, "/tmp/native-codex");
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(parts_text(&session.messages[0].parts), "visible user");
+        assert_eq!(parts_text(&session.messages[1].parts), "visible assistant");
+        assert!(matches!(
+            session.messages[2].parts[0],
+            NativePart::ToolCall { .. }
+        ));
+        assert!(matches!(
+            session.messages[3].parts[0],
+            NativePart::ToolResult { .. }
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_native_copilot_events_for_conversion() {
+        let root = temp_path("copilot-native-read");
+        let _ = fs::remove_dir_all(&root);
+        let session_dir = root.join("session-state/native_copilot");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join("events.jsonl"),
+            r#"{"type":"user.message","timestamp":"2026-07-03T10:00:01.000Z","data":{"content":"native user","transformedContent":"native user transformed"}}
+{"type":"assistant.message","timestamp":"2026-07-03T10:00:02.000Z","data":{"phase":"final_answer","content":"native assistant"}}
+{"type":"tool.execution_start","timestamp":"2026-07-03T10:00:03.000Z","data":{"toolCallId":"tool_1","toolName":"shell","arguments":{"cmd":"ls"}}}
+{"type":"tool.execution_complete","timestamp":"2026-07-03T10:00:04.000Z","data":{"toolCallId":"tool_1","success":true,"result":"ok"}}
+{"type":"system.message","timestamp":"2026-07-03T10:00:03.000Z","data":{"role":"system","content":"hidden system"}}"#,
+        )
+        .unwrap();
+        let session = read_copilot_session(Some(&root), "native_copilot").unwrap();
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(
+            parts_text(&session.messages[0].parts),
+            "native user transformed"
+        );
+        assert_eq!(parts_text(&session.messages[1].parts), "native assistant");
+        assert!(matches!(
+            session.messages[2].parts[0],
+            NativePart::ToolCall { .. }
+        ));
+        assert!(matches!(
+            session.messages[3].parts[0],
+            NativePart::ToolResult { .. }
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn roundtrips_codex_and_copilot_in_both_directions() {
+        let root = temp_path("codex-copilot-roundtrip");
+        let _ = fs::remove_dir_all(&root);
+        let codex_root = root.join("codex");
+        let copilot_root = root.join("copilot");
+
+        let codex_options = convert_options(
+            ImportTool::Claude,
+            ImportTool::Codex,
+            Some(codex_root.clone()),
+        );
+        write_codex_plan(
+            &codex_options,
+            sample_plan(ImportTool::Codex, "55555555-6666-4777-8888-999999999999"),
+        )
+        .unwrap();
+        let codex_readback =
+            read_codex_session(Some(&codex_root), "55555555-6666-4777-8888-999999999999").unwrap();
+        let codex_to_copilot = plan_from_session(
+            codex_readback,
+            ImportTool::Copilot,
+            "66666666-7777-4888-8999-aaaaaaaaaaaa",
+        );
+        let copilot_options = convert_options(
+            ImportTool::Codex,
+            ImportTool::Copilot,
+            Some(copilot_root.clone()),
+        );
+        write_copilot_plan(&copilot_options, codex_to_copilot).unwrap();
+        let copilot_readback =
+            read_copilot_session(Some(&copilot_root), "66666666-7777-4888-8999-aaaaaaaaaaaa")
+                .unwrap();
+
+        let second_codex_root = root.join("codex-again");
+        let copilot_to_codex = plan_from_session(
+            copilot_readback,
+            ImportTool::Codex,
+            "77777777-8888-4999-8aaa-bbbbbbbbbbbb",
+        );
+        let second_codex_options = convert_options(
+            ImportTool::Copilot,
+            ImportTool::Codex,
+            Some(second_codex_root.clone()),
+        );
+        write_codex_plan(&second_codex_options, copilot_to_codex).unwrap();
+        let final_readback = read_codex_session(
+            Some(&second_codex_root),
+            "77777777-8888-4999-8aaa-bbbbbbbbbbbb",
+        )
+        .unwrap();
+        assert_eq!(final_readback.title, "Imported Demo");
+        assert_eq!(final_readback.cwd, "/tmp/sessiongator-demo");
+        assert_eq!(parts_text(&final_readback.messages[0].parts), "hello");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn conversion_plan_supports_all_cross_tool_pairs() {
+        let tools = [
+            ImportTool::Claude,
+            ImportTool::Opencode,
+            ImportTool::Codex,
+            ImportTool::Copilot,
+        ];
+        for from in tools {
+            for to in tools {
+                if from == to {
+                    continue;
+                }
+                let mut source = sample_plan(from, "source_id").source_session;
+                source.tool = from;
+                source.id = format!("{}_source", from.name());
+                let (target, mapped, dropped, _, _) = map_session(
+                    &source,
+                    to,
+                    Some(format!("{}_target", to.name())),
+                    Some(default_supported_version(to).to_string()),
+                );
+                assert_eq!(target.tool, to);
+                assert_eq!(target.id, format!("{}_target", to.name()));
+                assert!(mapped.iter().any(|item| item == "messages"));
+                assert!(dropped.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn native_import_fixture_claude_basic_converts_to_opencode() {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/native-import/claude/2.1.199/basic-text/source");
@@ -2154,6 +3447,8 @@ mod tests {
                 match target_tool {
                     ImportTool::Claude => default_supported_version(ImportTool::Claude),
                     ImportTool::Opencode => default_supported_version(ImportTool::Opencode),
+                    ImportTool::Codex => default_supported_version(ImportTool::Codex),
+                    ImportTool::Copilot => default_supported_version(ImportTool::Copilot),
                 }
                 .to_string(),
             ),
@@ -2195,6 +3490,29 @@ mod tests {
         }
     }
 
+    fn convert_options(
+        from: ImportTool,
+        to: ImportTool,
+        target_store: Option<PathBuf>,
+    ) -> ConvertOptions {
+        ConvertOptions {
+            id: "source".to_string(),
+            from,
+            to,
+            source_store: None,
+            target_store,
+            target_id: None,
+            cwd: None,
+            title: None,
+            dry_run: false,
+            plan_json: false,
+            report_json: false,
+            backup: false,
+            force: false,
+            allow_unsupported_version: true,
+        }
+    }
+
     fn plan_from_session(
         source_session: NativeSession,
         target_tool: ImportTool,
@@ -2206,6 +3524,8 @@ mod tests {
                 match source_session.tool {
                     ImportTool::Claude => default_supported_version(ImportTool::Claude),
                     ImportTool::Opencode => default_supported_version(ImportTool::Opencode),
+                    ImportTool::Codex => default_supported_version(ImportTool::Codex),
+                    ImportTool::Copilot => default_supported_version(ImportTool::Copilot),
                 }
                 .to_string(),
             ),
@@ -2218,6 +3538,8 @@ mod tests {
                 match target_tool {
                     ImportTool::Claude => default_supported_version(ImportTool::Claude),
                     ImportTool::Opencode => default_supported_version(ImportTool::Opencode),
+                    ImportTool::Codex => default_supported_version(ImportTool::Codex),
+                    ImportTool::Copilot => default_supported_version(ImportTool::Copilot),
                 }
                 .to_string(),
             ),

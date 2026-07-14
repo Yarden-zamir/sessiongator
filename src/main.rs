@@ -11,9 +11,9 @@ use crate::model::{now_ms, rel_time, shorten_home, sort_sessions, SortMode};
 use crate::sources::sources_from_env;
 
 const USAGE: &str = "Usage: sessiongator [--list]
-       sessiongator convert --id <id> --from <claude|opencode> --to <claude|opencode> [options]
+       sessiongator convert --id <id> --from <claude|opencode|codex|copilot> --to <claude|opencode|codex|copilot> [options]
 
-Browse, search, and resume Claude Code and opencode sessions.
+Browse, search, and resume Claude Code, opencode, Codex, and Copilot sessions.
 
   (no args)   interactive picker; prints a selection line on Enter:
               resume\\t<tool>\\t<id>\\t<cwd>   (Enter)

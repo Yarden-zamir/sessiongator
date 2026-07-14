@@ -29,7 +29,7 @@ _sessiongator_bin() {
 # Selection lines from the binary:
 #   resume\t<tool>\t<id>\t<cwd>   (Enter)
 #   path\t<source path>           (Ctrl+O)
-#   convert\t<from>\t<to>\t<id>\t<cwd>   (Ctrl+T)
+#   convert\t<from>\t<default-to>\t<id>\t<cwd>   (Ctrl+T)
 ai-sessions() {
   local bin tmp exit_status selection kind tool id dir target
   bin="$(_sessiongator_bin)" || { echo "sessiongator binary not found" >&2; return 127; }
@@ -66,6 +66,8 @@ ai-sessions() {
       case "$tool" in
         claude) BUFFER="claude --resume ${(q)id}" ;;
         opencode) BUFFER="opencode --session ${(q)id}" ;;
+        codex) BUFFER="codex resume ${(q)id}" ;;
+        copilot) BUFFER="copilot --resume=${(q)id}" ;;
         *) echo "unknown session tool: $tool" >&2; return 1 ;;
       esac
       zle accept-line

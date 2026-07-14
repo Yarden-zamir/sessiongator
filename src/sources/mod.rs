@@ -1,4 +1,6 @@
 pub mod claude;
+pub mod codex;
+pub mod copilot;
 pub mod opencode;
 
 use crate::model::{Session, Tool};
@@ -25,5 +27,7 @@ pub fn sources_from_env() -> Vec<Box<dyn SessionSource>> {
     vec![
         Box::new(claude::ClaudeSource::from_env()),
         Box::new(opencode::OpencodeSource::from_env()),
+        Box::new(codex::CodexSource::from_env()),
+        Box::new(copilot::CopilotSource::from_env()),
     ]
 }

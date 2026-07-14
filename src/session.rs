@@ -62,14 +62,11 @@ fn path_selection(session: &Session) -> String {
 }
 
 fn convert_selection(session: &Session) -> String {
-    let target = match session.tool {
-        Tool::Claude => "opencode",
-        Tool::Opencode => "claude",
-    };
+    let target = session.tool.default_convert_target();
     format!(
         "convert\t{}\t{}\t{}\t{}",
         session.tool.name(),
-        target,
+        target.name(),
         session.id,
         session.cwd
     )
@@ -83,7 +80,9 @@ fn spawn_session_load(tx: mpsc::Sender<SessionBatch>) {
         if total == 0 {
             let _ = tx.send(SessionBatch {
                 sessions: Vec::new(),
-                error: Some("no session stores found (claude or opencode)".to_string()),
+                error: Some(
+                    "no session stores found (claude, opencode, codex, or copilot)".to_string(),
+                ),
                 done: true,
             });
             return;
@@ -156,7 +155,7 @@ pub fn select_session() -> AppResult<Option<String>> {
     let mut selected = 0usize;
     let mut list_offset = 0usize;
     let mut sort_mode = SortMode::Updated;
-    let mut search_mode = SearchMode::Sessions;
+    let mut search_mode = SearchMode::All;
     let mut focus = Focus::List;
     let mut loading = true;
     let mut error: Option<String> = None;
@@ -639,7 +638,7 @@ fn help_line(search_mode: SearchMode, sort_mode: SortMode, palette: &Palette) ->
         Span::styled("^o", key_style),
         Span::styled(" path  ", text_style),
         Span::styled("^t", key_style),
-        Span::styled(" convert  ", text_style),
+        Span::styled(" convert default  ", text_style),
         Span::styled("^y", key_style),
         Span::styled(" copy id  ", text_style),
         Span::styled("→/←", key_style),
@@ -708,6 +707,18 @@ mod tests {
         assert_eq!(
             convert_selection(&opencode),
             "convert\topencode\tclaude\tses_1\t/w"
+        );
+        let codex = session(Tool::Codex, "codex_1", "/c");
+        assert_eq!(resume_selection(&codex), "resume\tcodex\tcodex_1\t/c");
+        assert_eq!(
+            convert_selection(&codex),
+            "convert\tcodex\tclaude\tcodex_1\t/c"
+        );
+        let copilot = session(Tool::Copilot, "copilot_1", "/p");
+        assert_eq!(resume_selection(&copilot), "resume\tcopilot\tcopilot_1\t/p");
+        assert_eq!(
+            convert_selection(&copilot),
+            "convert\tcopilot\tclaude\tcopilot_1\t/p"
         );
     }
 

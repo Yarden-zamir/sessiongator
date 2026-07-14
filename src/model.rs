@@ -7,6 +7,8 @@ use std::{
 pub enum Tool {
     Claude,
     Opencode,
+    Codex,
+    Copilot,
 }
 
 impl Tool {
@@ -14,6 +16,8 @@ impl Tool {
         match self {
             Self::Claude => "claude",
             Self::Opencode => "opencode",
+            Self::Codex => "codex",
+            Self::Copilot => "copilot",
         }
     }
 
@@ -21,6 +25,15 @@ impl Tool {
         match self {
             Self::Claude => "◆",
             Self::Opencode => "◇",
+            Self::Codex => "●",
+            Self::Copilot => "○",
+        }
+    }
+
+    pub fn default_convert_target(self) -> Self {
+        match self {
+            Self::Claude => Self::Opencode,
+            Self::Opencode | Self::Codex | Self::Copilot => Self::Claude,
         }
     }
 }

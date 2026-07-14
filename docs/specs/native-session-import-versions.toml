@@ -103,3 +103,74 @@ store = "sqlite"
 fixture_root = "fixtures/native-import/opencode/1.17.13"
 notes = "CI latest-tool probe passed dry-run and isolated target-store writes against the current SQLite import layout."
 
+[[tools]]
+tool = "codex"
+version = "0.142.5"
+status = "target-supported"
+source = "local-sampling-and-basic-roundtrip"
+store = "rollout-jsonl"
+fixture_root = "fixtures/native-import/codex/0.142.5"
+notes = "Basic text/session metadata round-trip is supported through sessiongator-written Codex rollout JSONL and session_index.jsonl."
+
+[[tools]]
+tool = "copilot"
+version = "1.0.68"
+status = "target-supported"
+source = "local-sampling-and-basic-roundtrip"
+store = "session-store-sqlite-plus-session-state"
+fixture_root = "fixtures/native-import/copilot/1.0.68"
+notes = "Basic text/session metadata round-trip is supported through sessiongator-written session-state events and session-store.db projections."
+
+[[tools]]
+tool = "claude"
+version = "2.1.205"
+status = "target-supported"
+source = "local-sampling-and-matrix-roundtrip"
+store = "jsonl-projects"
+fixture_root = "fixtures/native-import/claude/2.1.199"
+notes = "Four-tool matrix probe passed dry-run and isolated target-store writes against the same projects JSONL layout as 2.1.199."
+
+[[tools]]
+tool = "opencode"
+version = "1.17.16"
+status = "target-supported"
+source = "local-sampling-and-matrix-roundtrip"
+store = "sqlite"
+fixture_root = "fixtures/native-import/opencode/1.17.13"
+notes = "Four-tool matrix probe passed dry-run and isolated target-store writes against the current SQLite import layout."
+
+[[tools]]
+tool = "codex"
+version = "0.143.0"
+status = "target-supported"
+source = "local-sampling-and-matrix-roundtrip"
+store = "rollout-jsonl"
+fixture_root = "fixtures/native-import/codex/0.142.5"
+notes = "Four-tool matrix probe passed basic text/session metadata writes through Codex rollout JSONL and session_index.jsonl."
+
+[[tools]]
+tool = "copilot"
+version = "1.0.69"
+status = "target-supported"
+source = "local-sampling-and-matrix-roundtrip"
+store = "session-store-sqlite-plus-session-state"
+fixture_root = "fixtures/native-import/copilot/1.0.68"
+notes = "Four-tool matrix probe passed basic text/session metadata writes through session-state events and session-store.db projections."
+
+[[tools]]
+tool = "claude"
+version = "2.1.207"
+status = "target-supported"
+source = "local-sampling-and-full-native-parser-roundtrip"
+store = "jsonl-projects"
+fixture_root = "fixtures/native-import/claude/2.1.199"
+notes = "Full native parser probe passed dry-run and isolated target-store writes against the same projects JSONL layout as 2.1.199."
+
+[[tools]]
+tool = "opencode"
+version = "1.17.17"
+status = "target-supported"
+source = "local-sampling-and-full-native-parser-roundtrip"
+store = "sqlite"
+fixture_root = "fixtures/native-import/opencode/1.17.13"
+notes = "Full native parser probe passed dry-run and isolated target-store writes against the current SQLite import layout."
