@@ -126,6 +126,9 @@ jobs:
   homebrew:
     needs: release
     if: needs.release.outputs.released == 'true'
+    permissions:
+      contents: write
+      pull-requests: write
     uses: Yarden-zamir/homebrew-tap/.github/workflows/sync-formula.yml@main
     with:
       formula: sessiongator
