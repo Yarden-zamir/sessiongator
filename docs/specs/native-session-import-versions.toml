@@ -174,3 +174,22 @@ source = "local-sampling-and-full-native-parser-roundtrip"
 store = "sqlite"
 fixture_root = "fixtures/native-import/opencode/1.17.13"
 notes = "Full native parser probe passed dry-run and isolated target-store writes against the current SQLite import layout."
+
+[[tools]]
+tool = "claude"
+version = "2.1.218"
+status = "target-supported"
+source = "ci-latest-tools"
+store = "jsonl-projects"
+fixture_root = "fixtures/native-import/claude/2.1.199"
+notes = "CI latest-tool probe passed dry-run and isolated target-store writes against the same projects JSONL layout as 2.1.199."
+
+[[tools]]
+tool = "opencode"
+version = "1.18.4"
+status = "target-supported"
+source = "ci-latest-tools"
+store = "sqlite"
+fixture_root = "fixtures/native-import/opencode/1.17.13"
+notes = "CI latest-tool probe passed dry-run and isolated target-store writes against the current SQLite import layout."
+
