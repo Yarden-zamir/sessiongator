@@ -3,10 +3,14 @@ name: release
 on:
   push:
     branches: [main]
-    paths:
-      - Cargo.toml
+    paths-ignore:
+      - README.md
+      - Readme.md
+      - readme.md
+      - .github/workflows/**
   workflow_dispatch:
 
+# Never let two releases race: each pushes a version commit to main.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -25,8 +29,29 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test
 
-  build:
+  # Derives the next version from the commits since the last tag, commits the
+  # bump, and tags it. Releases nothing when there are no new commits, which
+  # is what keeps its own release commit from triggering another release.
+  version:
     needs: checks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.bump.outputs.released }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.TOKEN }}
+      - id: bump
+        run: bash .github/scripts/bump-version.sh sessiongator
+
+  # Built from the tag so the binary carries the released version.
+  build:
+    needs: version
+    if: needs.version.outputs.released == 'true'
     strategy:
       matrix:
         include:
@@ -37,6 +62,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
       - run: |
@@ -49,101 +76,46 @@ jobs:
           path: ${{ env.BIN }}-${{ matrix.artifact }}.tar.gz
 
   release:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     outputs:
       released: ${{ steps.release.outputs.released }}
-      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ needs.version.outputs.tag }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - id: version
-        run: |
-          version="$(awk -F '"' '/^version =/ { print $2; exit }' Cargo.toml)"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
       - id: release
         env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ secrets.TOKEN }}
         run: |
-          tag="${{ steps.version.outputs.tag }}"
+          set -euo pipefail
+          tag="${{ needs.version.outputs.tag }}"
           if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists"
             echo "released=false" >> "$GITHUB_OUTPUT"
-            if [ "$EVENT_NAME" = "push" ]; then
-              echo "::error file=Cargo.toml::Release $tag already exists; bump the package version"
-              exit 1
-            fi
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
-            if [ "$(git rev-list -n 1 "$tag")" != "$GITHUB_SHA" ]; then
-              echo "::error::Tag $tag does not point to the release commit"
-              exit 1
-            fi
-          else
-            git tag "$tag"
-            git push origin "$tag"
-          fi
-
-          previous_tag=""
-          for candidate in $(git tag --sort=-creatordate); do
-            if [ "$candidate" != "$tag" ]; then
-              previous_tag="$candidate"
-              break
-            fi
-          done
-
-          if [ -n "$previous_tag" ]; then
-            range="$previous_tag..HEAD"
-          else
-            range="HEAD"
-          fi
-
-          {
-            echo "## Changelog"
-            echo
-            if [ -n "$previous_tag" ]; then
-              echo "Changes since $previous_tag."
-              echo
-            fi
-            for commit in $(git rev-list --reverse "$range"); do
-              short="$(git rev-parse --short "$commit")"
-              subject="$(git log -1 --format=%s "$commit")"
-              body="$(git log -1 --format=%b "$commit")"
-              echo "- $short $subject"
-              if [ -n "$body" ]; then
-                while IFS= read -r line; do
-                  if [ -n "$line" ]; then
-                    echo "  $line"
-                  fi
-                done <<< "$body"
-              fi
-            done
-          } > release-notes.md
-
+          bash .github/scripts/release-notes.sh "$tag" > release-notes.md
           gh release create "$tag" dist/*.tar.gz --title "$tag" --notes-file release-notes.md
           echo "released=true" >> "$GITHUB_OUTPUT"
 
   homebrew:
-    needs: release
-    if: needs.release.outputs.released == 'true' || github.event_name == 'workflow_dispatch'
+    needs: [version, release]
+    if: needs.release.outputs.released == 'true'
     permissions:
       contents: write
       pull-requests: write
     uses: Yarden-zamir/homebrew-tap/.github/workflows/sync-formula.yml@main
     with:
       formula: sessiongator
-      tag: ${{ needs.release.outputs.tag }}
+      tag: ${{ needs.version.outputs.tag }}
       repository: Yarden-zamir/sessiongator
     secrets:
       token: ${{ secrets.TOKEN }}
