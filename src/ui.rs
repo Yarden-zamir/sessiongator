@@ -1,49 +1,21 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, ListItem},
+    widgets::ListItem,
 };
 
 use crate::model::{rel_time, shorten_home, Session};
 use crate::sources::Turn;
+use gator::text::{highlight_line as highlighted_line, wrap_text_line};
 
 // The theme (Theme + Palette + OS dark-mode detection) is shared across the
 // gator app family.
 pub use gator::theme::{Palette, Theme};
 
-pub struct SessionLayout {
-    pub left: Rect,
-    pub search: Rect,
-    pub results: Rect,
-    pub transcript: Rect,
-    pub help: Rect,
-}
-
-pub fn session_layout(size: Rect) -> SessionLayout {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(8), Constraint::Length(3)])
-        .split(size);
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(chunks[0]);
-    let left_inner = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .inner(body[0]);
-    let left_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(left_inner);
-    SessionLayout {
-        left: body[0],
-        search: left_chunks[0],
-        results: left_chunks[1],
-        transcript: body[1],
-        help: chunks[1],
-    }
+/// The shared two-pane shell, with the session list taking 55% of the width.
+pub fn session_layout(size: Rect) -> gator::layout::SplitLayout {
+    gator::layout::split_layout(size, 55)
 }
 
 pub fn session_list_items(
@@ -233,106 +205,12 @@ fn push_wrapped_styled(
     }
 }
 
-fn wrap_text_line(line: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    if line.is_empty() {
-        return vec![String::new()];
-    }
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for ch in line.chars() {
-        if current.chars().count() >= width {
-            chunks.push(current);
-            current = String::new();
-        }
-        current.push(ch);
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
-}
-
-/// Split a line into spans, rendering case-insensitive `needle` matches in
-/// reverse video.
-fn highlighted_line(line: &str, needle: Option<&str>, text_color: Color) -> Line<'static> {
-    let base = Style::default().fg(text_color);
-    let Some(needle) = needle.map(str::trim).filter(|needle| !needle.is_empty()) else {
-        return Line::from(Span::styled(line.to_string(), base));
-    };
-    let lower_line = line.to_lowercase();
-    let lower_needle = needle.to_lowercase();
-    let mut spans = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(found) = lower_line[cursor..].find(&lower_needle) {
-        let start = cursor + found;
-        let end = start + lower_needle.len();
-        // Guard against multi-byte boundaries: fall back to no highlight if the
-        // lowercased offsets don't align with the original string.
-        if !line.is_char_boundary(start) || !line.is_char_boundary(end) || end > line.len() {
-            return Line::from(Span::styled(line.to_string(), base));
-        }
-        if start > cursor {
-            spans.push(Span::styled(line[cursor..start].to_string(), base));
-        }
-        spans.push(Span::styled(
-            line[start..end].to_string(),
-            base.add_modifier(Modifier::REVERSED),
-        ));
-        cursor = end;
-    }
-    if cursor < line.len() {
-        spans.push(Span::styled(line[cursor..].to_string(), base));
-    }
-    if spans.is_empty() {
-        return Line::from(Span::styled(line.to_string(), base));
-    }
-    Line::from(spans)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_theme_names() {
-        assert_eq!(Theme::parse("auto"), Ok(Theme::Auto));
-        assert_eq!(Theme::parse("light"), Ok(Theme::Light));
-        assert_eq!(Theme::parse("dark"), Ok(Theme::Dark));
-        assert!(Theme::parse("system").is_err());
-    }
-
-    #[test]
-    fn explicit_themes_match_navgator_palettes() {
-        let light = Palette::for_theme(Theme::Light);
-        assert_eq!(light.text, Color::Black);
-        assert_eq!(light.muted, Color::Black);
-        assert_eq!(light.accent, Color::Rgb(72, 166, 255));
-
-        let dark = Palette::for_theme(Theme::Dark);
-        assert_eq!(dark.text, Color::Rgb(229, 231, 235));
-        assert_eq!(dark.muted, Color::Rgb(156, 163, 175));
-        assert_eq!(dark.accent, Color::Rgb(99, 179, 237));
-    }
-
-    #[test]
-    fn truncation() {
-        assert_eq!(truncate_with_ellipsis("hello", 10), "hello");
-        assert_eq!(truncate_with_ellipsis("hello world", 6), "hello…");
-        assert_eq!(truncate_with_ellipsis("hello", 0), "");
-    }
-
-    #[test]
-    fn highlight_marks_matches() {
-        let line = highlighted_line("the Rate limiter rate", Some("rate"), Color::Black);
-        let reversed: Vec<String> = line
-            .spans
-            .iter()
-            .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
-            .map(|span| span.content.to_string())
-            .collect();
-        assert_eq!(reversed, vec!["Rate", "rate"]);
-    }
+    // Theme parsing, palette values, truncation, and match highlighting are
+    // gator's contracts and are tested there.
 
     #[test]
     fn transcript_reports_first_match_line() {
@@ -427,12 +305,5 @@ mod tests {
             .collect();
         assert!(rendered.to_lowercase().contains("needle"));
         assert!(line > 5, "match should account for wrapped rows");
-    }
-
-    #[test]
-    fn highlight_survives_multibyte() {
-        // must not panic or split a char boundary
-        let _ = highlighted_line("préfix — ünïcode", Some("é"), Color::Black);
-        let _ = highlighted_line("emoji 🎉 test", Some("test"), Color::Black);
     }
 }

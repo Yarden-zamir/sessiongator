@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Sessiongator Config",
+  "description": "Configuration file for sessiongator theme and keybindings.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "title": "Schema URL",
+      "description": "Optional JSON Schema URL for editor autocompletion and validation.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "keybindings": {
+      "title": "Keybindings",
+      "description": "Context-specific mappings from key chords to action identifiers.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConfigKeybindings"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ui": {
+      "title": "UI",
+      "description": "User interface color and display settings.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConfigUi"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "ConfigKeybindings": {
+      "title": "Keybindings",
+      "description": "Key chord to action mappings for each context.",
+      "type": "object",
+      "properties": {
+        "global": {
+          "description": "Bindings that apply in every context.",
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "list": {
+          "description": "Bindings for the session list and search input.",
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "transcript": {
+          "description": "Bindings for the transcript pane.",
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConfigUi": {
+      "title": "UI Settings",
+      "description": "User interface color settings.",
+      "type": "object",
+      "properties": {
+        "theme": {
+          "title": "Theme",
+          "description": "Color theme to use: auto, light, or dark. Defaults to auto.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Theme"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Theme": {
+      "description": "Theme selection as it appears in a `[ui] theme = \"...\"` config value.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "light",
+            "dark"
+          ]
+        },
+        {
+          "description": "Follow the operating system appearance.",
+          "type": "string",
+          "enum": [
+            "auto"
+          ]
+        }
+      ]
+    }
+  }
+}

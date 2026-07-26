@@ -5,18 +5,20 @@ use std::{
     time::Duration,
 };
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
-use gator::text::rect_contains;
+use crossterm::event::{self, Event, MouseButton, MouseEventKind};
+use gator::layout::{binding_hint, binding_state_hint, help_line, HelpHint};
+use gator::text::{insert_paste, list_window_offset, rect_contains};
 use gator::{copy_to_clipboard, input_at_end, setup_terminal, AppResult};
 use ratatui::{
     layout::Alignment,
     style::{Modifier, Style},
-    text::{Line, Span, Text},
+    text::Text,
     widgets::{Block, BorderType, Borders, List, ListState, Paragraph, Wrap},
 };
 use tui_input::backend::crossterm::EventHandler;
-use tui_input::{Input, InputRequest};
+use tui_input::Input;
 
+use crate::keybindings::{BindingContext, BindingTarget, CoreAction, Keymap};
 use crate::model::{now_ms, sort_sessions, Session, SortMode, Tool};
 use crate::search::{filter_sessions, SearchMode};
 use crate::sources::{sources_from_env, Turn};
@@ -149,7 +151,7 @@ fn spawn_content_index(targets: Vec<(Tool, String, String)>, tx: mpsc::Sender<Co
     });
 }
 
-pub fn select_session(theme: Theme) -> AppResult<Option<String>> {
+pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>> {
     let palette = Palette::for_theme(theme);
     let (mut terminal, _guard) = setup_terminal()?;
 
@@ -334,7 +336,7 @@ pub fn select_session(theme: Theme) -> AppResult<Option<String>> {
             // Highlight the query in the transcript in every search mode, so
             // moving between results always shows where the text matched.
             let highlight = Some(input.value()).filter(|value| !value.trim().is_empty());
-            let transcript_width = ui.transcript.width.saturating_sub(2) as usize;
+            let transcript_width = ui.detail.width.saturating_sub(2) as usize;
             let (text, first_match) = transcript_text(
                 session,
                 turns.map(Vec::as_slice),
@@ -345,7 +347,7 @@ pub fn select_session(theme: Theme) -> AppResult<Option<String>> {
                 transcript_width,
                 &palette,
             );
-            let height = ui.transcript.height.saturating_sub(2) as usize;
+            let height = ui.detail.height.saturating_sub(2) as usize;
             transcript_page_step = height.max(1);
             transcript_max_scroll = text.lines.len().saturating_sub(height);
             transcript_scroll = transcript_scroll.min(transcript_max_scroll);
@@ -377,9 +379,9 @@ pub fn select_session(theme: Theme) -> AppResult<Option<String>> {
                 .block(block)
                 .alignment(Alignment::Left)
                 .scroll((transcript_scroll as u16, 0));
-            frame.render_widget(widget, ui.transcript);
+            frame.render_widget(widget, ui.detail);
 
-            let help = help_line(search_mode, sort_mode, &palette);
+            let help = help_line(&help_hints(keymap, search_mode, sort_mode), &palette);
             frame.render_widget(
                 Paragraph::new(Text::from(help))
                     .block(
@@ -402,179 +404,165 @@ pub fn select_session(theme: Theme) -> AppResult<Option<String>> {
             let mut reset_selection = false;
             loop {
                 match event::read()? {
-                    Event::Key(key) => match key.code {
-                        KeyCode::Esc => {
-                            terminal.show_cursor()?;
-                            return Ok(None);
-                        }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            terminal.show_cursor()?;
-                            return Ok(None);
-                        }
-                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if let Some(session) = filtered
-                                .get(selected)
-                                .and_then(|index| sessions.get(*index))
+                    Event::Key(key) => {
+                        let context = match focus {
+                            Focus::List => BindingContext::List,
+                            Focus::Transcript => BindingContext::Transcript,
+                        };
+                        // Right only leaves the search input once the cursor
+                        // reaches its end, so it still moves through typed text.
+                        let resolved = match keymap.resolve(context, &key) {
+                            Some(BindingTarget::Core(CoreAction::MoveRight))
+                                if focus == Focus::List && !input_at_end(&input) =>
                             {
-                                terminal.show_cursor()?;
-                                return Ok(Some(resume_here_selection(session)));
+                                None
+                            }
+                            other => other.cloned(),
+                        };
+                        match resolved {
+                            Some(BindingTarget::Core(action)) => match action {
+                                CoreAction::Cancel => {
+                                    terminal.show_cursor()?;
+                                    return Ok(None);
+                                }
+                                CoreAction::Resume => {
+                                    if let Some(session) = filtered
+                                        .get(selected)
+                                        .and_then(|index| sessions.get(*index))
+                                    {
+                                        terminal.show_cursor()?;
+                                        return Ok(Some(resume_selection(session)));
+                                    }
+                                }
+                                CoreAction::ResumeHere => {
+                                    if let Some(session) = filtered
+                                        .get(selected)
+                                        .and_then(|index| sessions.get(*index))
+                                    {
+                                        terminal.show_cursor()?;
+                                        return Ok(Some(resume_here_selection(session)));
+                                    }
+                                }
+                                CoreAction::ShowPath => {
+                                    if let Some(session) = filtered
+                                        .get(selected)
+                                        .and_then(|index| sessions.get(*index))
+                                    {
+                                        terminal.show_cursor()?;
+                                        return Ok(Some(path_selection(session)));
+                                    }
+                                }
+                                CoreAction::Convert => {
+                                    if let Some(session) = filtered
+                                        .get(selected)
+                                        .and_then(|index| sessions.get(*index))
+                                    {
+                                        terminal.show_cursor()?;
+                                        return Ok(Some(convert_selection(session)));
+                                    }
+                                }
+                                CoreAction::CopyId => {
+                                    if let Some(session) = filtered
+                                        .get(selected)
+                                        .and_then(|index| sessions.get(*index))
+                                    {
+                                        let _ = copy_to_clipboard(&session.id);
+                                    }
+                                }
+                                CoreAction::ToggleSearch => {
+                                    search_mode = search_mode.toggle();
+                                    needs_refilter = true;
+                                }
+                                CoreAction::CycleSort => {
+                                    sort_mode = sort_mode.next();
+                                    let previous_key = filtered
+                                        .get(selected)
+                                        .and_then(|index| sessions.get(*index))
+                                        .map(Session::key);
+                                    sort_sessions(&mut sessions, sort_mode);
+                                    blobs = sessions.iter().map(Session::search_blob).collect();
+                                    filtered = filter_sessions(
+                                        &sessions,
+                                        &blobs,
+                                        input.value(),
+                                        search_mode,
+                                        &content,
+                                    );
+                                    selected = previous_key
+                                        .and_then(|key| {
+                                            filtered
+                                                .iter()
+                                                .position(|index| sessions[*index].key() == key)
+                                        })
+                                        .unwrap_or(0);
+                                    list_offset = 0;
+                                }
+                                CoreAction::MoveUp => match focus {
+                                    Focus::List => {
+                                        selected = selected.saturating_sub(1);
+                                        transcript_scroll = 0;
+                                    }
+                                    // At the top of the transcript, Up returns
+                                    // focus to the list.
+                                    Focus::Transcript => {
+                                        if transcript_scroll > 0 {
+                                            transcript_scroll -= 1;
+                                        } else {
+                                            focus = Focus::List;
+                                        }
+                                    }
+                                },
+                                CoreAction::MoveDown => match focus {
+                                    Focus::List => {
+                                        selected =
+                                            (selected + 1).min(filtered.len().saturating_sub(1));
+                                        transcript_scroll = 0;
+                                    }
+                                    Focus::Transcript => {
+                                        transcript_scroll =
+                                            (transcript_scroll + 1).min(transcript_max_scroll);
+                                    }
+                                },
+                                CoreAction::MoveLeft => focus = Focus::List,
+                                CoreAction::MoveRight => focus = Focus::Transcript,
+                                CoreAction::MoveHome => {
+                                    selected = 0;
+                                    transcript_scroll = 0;
+                                }
+                                CoreAction::MoveEnd => {
+                                    selected = filtered.len().saturating_sub(1);
+                                    transcript_scroll = 0;
+                                }
+                                CoreAction::PageUp => {
+                                    transcript_scroll =
+                                        transcript_scroll.saturating_sub(transcript_page_step);
+                                }
+                                CoreAction::PageDown => {
+                                    transcript_scroll = (transcript_scroll + transcript_page_step)
+                                        .min(transcript_max_scroll);
+                                }
+                                CoreAction::ScrollTop => transcript_scroll = 0,
+                                CoreAction::ScrollBottom => {
+                                    transcript_scroll = transcript_max_scroll
+                                }
+                            },
+                            // Disabled and configured targets consume the key
+                            // without typing it.
+                            Some(_) => {}
+                            None => {
+                                if focus == Focus::List {
+                                    let before = input.value().to_string();
+                                    let _ = input.handle_event(&Event::Key(key));
+                                    if input.value() != before {
+                                        needs_refilter = true;
+                                        reset_selection = true;
+                                    }
+                                }
                             }
                         }
-                        KeyCode::Enter => {
-                            if let Some(session) = filtered
-                                .get(selected)
-                                .and_then(|index| sessions.get(*index))
-                            {
-                                terminal.show_cursor()?;
-                                return Ok(Some(resume_selection(session)));
-                            }
-                        }
-                        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if let Some(session) = filtered
-                                .get(selected)
-                                .and_then(|index| sessions.get(*index))
-                            {
-                                terminal.show_cursor()?;
-                                return Ok(Some(path_selection(session)));
-                            }
-                        }
-                        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if let Some(session) = filtered
-                                .get(selected)
-                                .and_then(|index| sessions.get(*index))
-                            {
-                                terminal.show_cursor()?;
-                                return Ok(Some(convert_selection(session)));
-                            }
-                        }
-                        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if let Some(session) = filtered
-                                .get(selected)
-                                .and_then(|index| sessions.get(*index))
-                            {
-                                let _ = copy_to_clipboard(&session.id);
-                            }
-                        }
-                        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            search_mode = search_mode.toggle();
-                            needs_refilter = true;
-                        }
-                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            sort_mode = sort_mode.next();
-                            let previous_key = filtered
-                                .get(selected)
-                                .and_then(|index| sessions.get(*index))
-                                .map(Session::key);
-                            sort_sessions(&mut sessions, sort_mode);
-                            blobs = sessions.iter().map(Session::search_blob).collect();
-                            filtered = filter_sessions(
-                                &sessions,
-                                &blobs,
-                                input.value(),
-                                search_mode,
-                                &content,
-                            );
-                            selected = previous_key
-                                .and_then(|key| {
-                                    filtered
-                                        .iter()
-                                        .position(|index| sessions[*index].key() == key)
-                                })
-                                .unwrap_or(0);
-                            list_offset = 0;
-                        }
-                        KeyCode::Up
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                && focus == Focus::List =>
-                        {
-                            selected = 0;
-                            transcript_scroll = 0;
-                        }
-                        KeyCode::Down
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                && focus == Focus::List =>
-                        {
-                            selected = filtered.len().saturating_sub(1);
-                            transcript_scroll = 0;
-                        }
-                        KeyCode::Up
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                && focus == Focus::Transcript =>
-                        {
-                            transcript_scroll = 0;
-                        }
-                        KeyCode::Down
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                && focus == Focus::Transcript =>
-                        {
-                            transcript_scroll = transcript_max_scroll;
-                        }
-                        KeyCode::Up if focus == Focus::List => {
-                            selected = selected.saturating_sub(1);
-                            transcript_scroll = 0;
-                        }
-                        KeyCode::Down if focus == Focus::List => {
-                            selected = (selected + 1).min(filtered.len().saturating_sub(1));
-                            transcript_scroll = 0;
-                        }
-                        // Right at the end of the input moves into the
-                        // transcript, like navigate's search → preview.
-                        KeyCode::Right
-                            if focus == Focus::List
-                                && !key.modifiers.intersects(
-                                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
-                                )
-                                && input_at_end(&input) =>
-                        {
-                            focus = Focus::Transcript;
-                        }
-                        KeyCode::Up if focus == Focus::Transcript => {
-                            if transcript_scroll > 0 {
-                                transcript_scroll -= 1;
-                            } else {
-                                focus = Focus::List;
-                            }
-                        }
-                        KeyCode::Down if focus == Focus::Transcript => {
-                            transcript_scroll = (transcript_scroll + 1).min(transcript_max_scroll);
-                        }
-                        KeyCode::Left if focus == Focus::Transcript => {
-                            focus = Focus::List;
-                        }
-                        KeyCode::PageUp => {
-                            transcript_scroll =
-                                transcript_scroll.saturating_sub(transcript_page_step);
-                        }
-                        KeyCode::PageDown => {
-                            transcript_scroll = (transcript_scroll + transcript_page_step)
-                                .min(transcript_max_scroll);
-                        }
-                        KeyCode::Home
-                            if focus == Focus::Transcript
-                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            transcript_scroll = 0;
-                        }
-                        KeyCode::End
-                            if focus == Focus::Transcript
-                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            transcript_scroll = transcript_max_scroll;
-                        }
-                        _ if focus == Focus::List => {
-                            let before = input.value().to_string();
-                            let _ = input.handle_event(&Event::Key(key));
-                            if input.value() != before {
-                                needs_refilter = true;
-                                reset_selection = true;
-                            }
-                        }
-                        _ => {}
-                    },
+                    }
                     Event::Paste(value) => {
-                        for ch in value.chars().filter(|ch| *ch != '\r') {
-                            input.handle(InputRequest::InsertChar(ch));
-                        }
+                        insert_paste(&mut input, &value);
                         needs_refilter = true;
                         reset_selection = true;
                     }
@@ -586,12 +574,12 @@ pub fn select_session(theme: Theme) -> AppResult<Option<String>> {
                                     (list_offset + row).min(filtered.len().saturating_sub(1));
                                 transcript_scroll = 0;
                                 focus = Focus::List;
-                            } else if rect_contains(ui.transcript, mouse.column, mouse.row) {
+                            } else if rect_contains(ui.detail, mouse.column, mouse.row) {
                                 focus = Focus::Transcript;
                             }
                         }
                         MouseEventKind::ScrollUp => {
-                            if rect_contains(ui.transcript, mouse.column, mouse.row) {
+                            if rect_contains(ui.detail, mouse.column, mouse.row) {
                                 transcript_scroll = transcript_scroll.saturating_sub(1);
                             } else if rect_contains(ui.results, mouse.column, mouse.row) {
                                 selected = selected.saturating_sub(1);
@@ -599,7 +587,7 @@ pub fn select_session(theme: Theme) -> AppResult<Option<String>> {
                             }
                         }
                         MouseEventKind::ScrollDown => {
-                            if rect_contains(ui.transcript, mouse.column, mouse.row) {
+                            if rect_contains(ui.detail, mouse.column, mouse.row) {
                                 transcript_scroll =
                                     (transcript_scroll + 1).min(transcript_max_scroll);
                             } else if rect_contains(ui.results, mouse.column, mouse.row) {
@@ -640,45 +628,34 @@ pub fn select_session(theme: Theme) -> AppResult<Option<String>> {
     }
 }
 
-fn help_line(search_mode: SearchMode, sort_mode: SortMode, palette: &Palette) -> Line<'static> {
-    let key_style = Style::default().fg(palette.key);
-    let text_style = Style::default().fg(palette.text);
-    let accent = Style::default().fg(palette.accent);
-    Line::from(vec![
-        Span::styled("enter", key_style),
-        Span::styled(" resume  ", text_style),
-        Span::styled("^enter", key_style),
-        Span::styled(" resume here  ", text_style),
-        Span::styled("^f", key_style),
-        Span::styled(format!(" search:{}  ", search_mode.label()), accent),
-        Span::styled("^s", key_style),
-        Span::styled(format!(" sort:{}  ", sort_mode.label()), accent),
-        Span::styled("^o", key_style),
-        Span::styled(" path  ", text_style),
-        Span::styled("^t", key_style),
-        Span::styled(" convert default  ", text_style),
-        Span::styled("^y", key_style),
-        Span::styled(" copy id  ", text_style),
-        Span::styled("→/←", key_style),
-        Span::styled(" focus transcript/list  ", text_style),
-        Span::styled("↑↓", key_style),
-        Span::styled(" move/scroll  ", text_style),
-        Span::styled("esc", key_style),
-        Span::styled(" quit", text_style),
-    ])
-}
-
-fn list_window_offset(selected: usize, offset: usize, height: usize, len: usize) -> usize {
-    if height == 0 || len == 0 {
-        return 0;
-    }
-    let mut offset = offset.min(len.saturating_sub(1));
-    if selected < offset {
-        offset = selected;
-    } else if selected >= offset + height {
-        offset = selected + 1 - height;
-    }
-    offset.min(len.saturating_sub(height.min(len)))
+/// Footer hints, labeled with whatever chord is currently bound to each
+/// action, so rebinding a key updates the help automatically.
+fn help_hints(keymap: &Keymap, search_mode: SearchMode, sort_mode: SortMode) -> Vec<HelpHint> {
+    let context = BindingContext::List;
+    [
+        binding_hint(keymap, context, CoreAction::Resume, "resume"),
+        binding_hint(keymap, context, CoreAction::ResumeHere, "resume here"),
+        binding_state_hint(
+            keymap,
+            context,
+            CoreAction::ToggleSearch,
+            format!("search:{}", search_mode.label()),
+        ),
+        binding_state_hint(
+            keymap,
+            context,
+            CoreAction::CycleSort,
+            format!("sort:{}", sort_mode.label()),
+        ),
+        binding_hint(keymap, context, CoreAction::ShowPath, "path"),
+        binding_hint(keymap, context, CoreAction::Convert, "convert default"),
+        binding_hint(keymap, context, CoreAction::CopyId, "copy id"),
+        binding_hint(keymap, context, CoreAction::MoveRight, "transcript"),
+        binding_hint(keymap, context, CoreAction::Cancel, "quit"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 #[cfg(test)]

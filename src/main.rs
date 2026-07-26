@@ -1,3 +1,5 @@
+mod config;
+mod keybindings;
 mod model;
 mod native_import;
 mod search;
@@ -13,6 +15,7 @@ use crate::ui::Theme;
 
 const USAGE: &str = "Usage: sessiongator [--list] [--theme <auto|light|dark>]
        sessiongator convert --id <id> --from <claude|opencode|codex|copilot> --to <claude|opencode|codex|copilot> [options]
+       sessiongator config-schema
 
 Browse, search, and resume Claude Code, opencode, Codex, and Copilot sessions.
 
@@ -21,9 +24,13 @@ Browse, search, and resume Claude Code, opencode, Codex, and Copilot sessions.
               resume-here\\t<tool>\\t<id>\\t      (Ctrl+Enter)
               path\\t<source path>           (Ctrl+O)
   --list      print all sessions, newest first (tool, id, age, cwd, title)
-  --theme     interactive color theme; defaults to SESSIONGATOR_THEME or auto
+  --theme     interactive color theme; overrides SESSIONGATOR_THEME and config
   convert     convert one session into the target tool's native store
-  -h, --help  show this help";
+  config-schema
+              print the JSON Schema for the config file
+  -h, --help  show this help
+
+Theme and keybindings can also be set in the config file.";
 
 struct UiOptions {
     list: bool,
@@ -34,6 +41,10 @@ fn main() -> AppResult<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "convert") {
         return native_import::run_convert(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "config-schema") {
+        println!("{}", config::config_schema_json()?);
+        return Ok(());
     }
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         println!("{USAGE}");
@@ -49,13 +60,15 @@ fn main() -> AppResult<()> {
     if options.list {
         return list_mode();
     }
+    let loaded = config::load_config(&[])?;
     let theme = resolve_theme(
         options.theme,
         std::env::var("SESSIONGATOR_THEME").ok().as_deref(),
+        loaded.theme,
     )
     .map_err(|message| format!("SESSIONGATOR_THEME: {message}"))?;
     ensure_tty_stdin()?;
-    match session::select_session(theme)? {
+    match session::select_session(theme, &loaded.keymap)? {
         Some(selection) => write_selection(&selection),
         None => std::process::exit(1),
     }
@@ -85,11 +98,20 @@ fn parse_ui_options(args: &[String]) -> Result<UiOptions, String> {
     Ok(UiOptions { list, theme })
 }
 
-fn resolve_theme(cli: Option<Theme>, environment: Option<&str>) -> Result<Theme, String> {
+/// Theme precedence: `--theme` beats `SESSIONGATOR_THEME`, which beats the
+/// config file, which falls back to `auto`.
+fn resolve_theme(
+    cli: Option<Theme>,
+    environment: Option<&str>,
+    configured: Option<Theme>,
+) -> Result<Theme, String> {
     if let Some(theme) = cli {
         return Ok(theme);
     }
-    environment.map(Theme::parse).unwrap_or(Ok(Theme::Auto))
+    if let Some(value) = environment {
+        return Theme::parse(value);
+    }
+    Ok(configured.unwrap_or(Theme::Auto))
 }
 
 fn list_mode() -> AppResult<()> {
@@ -145,13 +167,20 @@ mod tests {
     }
 
     #[test]
-    fn cli_theme_overrides_environment() {
+    fn cli_theme_overrides_environment_which_overrides_config() {
         assert_eq!(
-            resolve_theme(Some(Theme::Light), Some("dark")),
+            resolve_theme(Some(Theme::Light), Some("dark"), Some(Theme::Dark)),
             Ok(Theme::Light)
         );
-        assert_eq!(resolve_theme(None, Some("dark")), Ok(Theme::Dark));
-        assert_eq!(resolve_theme(None, None), Ok(Theme::Auto));
-        assert!(resolve_theme(None, Some("system")).is_err());
+        assert_eq!(
+            resolve_theme(None, Some("dark"), Some(Theme::Light)),
+            Ok(Theme::Dark)
+        );
+        assert_eq!(
+            resolve_theme(None, None, Some(Theme::Dark)),
+            Ok(Theme::Dark)
+        );
+        assert_eq!(resolve_theme(None, None, None), Ok(Theme::Auto));
+        assert!(resolve_theme(None, Some("system"), None).is_err());
     }
 }
