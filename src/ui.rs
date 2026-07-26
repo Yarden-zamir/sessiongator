@@ -8,86 +8,9 @@ use ratatui::{
 use crate::model::{rel_time, shorten_home, Session};
 use crate::sources::Turn;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Theme {
-    Auto,
-    Light,
-    Dark,
-}
-
-impl Theme {
-    pub fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "auto" => Ok(Self::Auto),
-            "light" => Ok(Self::Light),
-            "dark" => Ok(Self::Dark),
-            _ => Err(format!(
-                "invalid theme {value:?}; expected auto, light, or dark"
-            )),
-        }
-    }
-}
-
-pub struct Palette {
-    pub accent: Color,
-    pub warm: Color,
-    pub text: Color,
-    pub muted: Color,
-    pub key: Color,
-}
-
-impl Palette {
-    pub fn for_theme(theme: Theme) -> Self {
-        match theme {
-            Theme::Auto if os_prefers_dark_theme() => Self::dark(),
-            Theme::Auto | Theme::Light => Self::light(),
-            Theme::Dark => Self::dark(),
-        }
-    }
-
-    fn light() -> Self {
-        Self {
-            accent: Color::Rgb(72, 166, 255),
-            warm: Color::Rgb(255, 181, 92),
-            text: Color::Black,
-            muted: Color::Black,
-            key: Color::Rgb(150, 150, 150),
-        }
-    }
-
-    fn dark() -> Self {
-        Self {
-            accent: Color::Rgb(99, 179, 237),
-            warm: Color::Rgb(251, 191, 36),
-            key: Color::Rgb(156, 163, 175),
-            text: Color::Rgb(229, 231, 235),
-            muted: Color::Rgb(156, 163, 175),
-        }
-    }
-}
-
-fn os_prefers_dark_theme() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("defaults")
-            .arg("read")
-            .arg("-g")
-            .arg("AppleInterfaceStyle")
-            .output()
-            .map(|output| {
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout)
-                        .trim()
-                        .eq_ignore_ascii_case("Dark")
-            })
-            .unwrap_or(false)
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
-}
+// The theme (Theme + Palette + OS dark-mode detection) is shared across the
+// gator app family.
+pub use gator::theme::{Palette, Theme};
 
 pub struct SessionLayout {
     pub left: Rect,
@@ -179,20 +102,7 @@ fn session_row(
     ]))
 }
 
-pub fn truncate_with_ellipsis(value: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let count = value.chars().count();
-    if count <= max {
-        return value.to_string();
-    }
-    if max <= 1 {
-        return value.chars().take(max).collect();
-    }
-    let trimmed = value.chars().take(max - 1).collect::<String>();
-    format!("{trimmed}…")
-}
+pub use gator::text::truncate_with_ellipsis;
 
 /// Transcript panel text: metadata header + role-labeled turns. When
 /// `highlight` is set, occurrences are shown in reverse video and the index of

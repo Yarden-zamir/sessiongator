@@ -120,16 +120,7 @@ pub fn clean_title(value: &str) -> String {
 }
 
 pub fn shorten_home(path: &str) -> String {
-    let Ok(home) = std::env::var("HOME") else {
-        return path.to_string();
-    };
-    if path == home {
-        "~".to_string()
-    } else if let Some(rest) = path.strip_prefix(&format!("{home}/")) {
-        format!("~/{rest}")
-    } else {
-        path.to_string()
-    }
+    gator::text::collapse_home_env(path)
 }
 
 pub fn now_ms() -> i64 {

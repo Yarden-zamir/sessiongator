@@ -10,7 +10,7 @@ categories = ["command-line-interface", "development-tools"]
 
 [dependencies]
 crossterm = "0.29"
-gator = { git = "https://github.com/Yarden-zamir/gator", tag = "v0.1.0" }
+gator = { git = "https://github.com/Yarden-zamir/gator", branch = "main" }
 ratatui = "0.30"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = "1.0"

@@ -6,6 +6,7 @@ use std::{
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use gator::text::rect_contains;
 use gator::{copy_to_clipboard, input_at_end, setup_terminal, AppResult};
 use ratatui::{
     layout::Alignment,
@@ -665,13 +666,6 @@ fn help_line(search_mode: SearchMode, sort_mode: SortMode, palette: &Palette) ->
         Span::styled("esc", key_style),
         Span::styled(" quit", text_style),
     ])
-}
-
-fn rect_contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
-    col >= rect.x
-        && col < rect.x.saturating_add(rect.width)
-        && row >= rect.y
-        && row < rect.y.saturating_add(rect.height)
 }
 
 fn list_window_offset(selected: usize, offset: usize, height: usize, len: usize) -> usize {

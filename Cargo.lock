@@ -443,7 +443,7 @@ dependencies = [
 [[package]]
 name = "gator"
 version = "0.1.0"
-source = "git+https://github.com/Yarden-zamir/gator?tag=v0.1.0#2fe3a5e57666a770fd387b1e0635328eff56310e"
+source = "git+https://github.com/Yarden-zamir/gator?branch=main#8591a7188d137cd1656872c492b0496d218b4bf5"
 dependencies = [
  "crossterm",
  "libc",
