@@ -256,31 +256,27 @@ labor as `navgator` returning a path the wrapper `cd`s into.
 
 ## Infra Changes Required
 
-Everything below is one-time wiring; day-to-day releases stay fully automatic.
+Everything below reflects the extracted standalone repository.
 
-1. ✅ **Workspace (`Cargo.toml`).** `"crates/sessiongator"` added to
-   `[workspace.members]`; `rusqlite = { version = "0.37", features = ["bundled"] }`
-   in `[workspace.dependencies]`. `bundled` compiles SQLite into the binary, so
-   no new system dependency for CI, Homebrew, or source builds — only added
-   compile time.
-2. ✅ **CI (`.github/workflows/ci.yml`).** No change needed. `cargo
-   fmt/test/build` run `--workspace` and pick the new crate up automatically;
-   the release flow (tag → release → `brew bump-formula-pr`) is crate-agnostic.
-3. ⬜ **Homebrew formula (tap `Formula/navgator.rb`) — one-time manual edit.**
-   The install block cargo-installs each crate explicitly, and the automated
-   `bump-formula-pr` only rewrites `url`/`sha256`. When the crate ships, add:
-   `system "cargo", "install", *std_cargo_args(path: "crates/sessiongator")`
-   and `pkgshare.install "scripts/sessiongator.zsh"`, and mention the new
-   widget in `caveats`.
+1. ✅ **Package (`Cargo.toml`).** `sessiongator` is the root package;
+   `rusqlite` uses the `bundled` feature, so CI, Homebrew, and source builds do
+   not need a system SQLite dependency.
+2. ✅ **CI (`.github/workflows/ci.yml`).** Formatting, clippy, tests, and the
+   release build run directly against the root package.
+3. ✅ **Release and Homebrew.** Changing the root package version on `main`
+   triggers `.github/workflows/release.yml`; it creates the matching tag and
+   release, then calls the tap's reusable formula-sync workflow using
+   `.homebrew/sessiongator.rb`.
 4. ✅ **Wrapper script.** `scripts/sessiongator.zsh` (the existing
    `navgator.zsh` is navigate-specific): binary lookup order
-   `$SESSIONGATOR_BIN` → `sessiongator` on `PATH` →
-   `target/release` → `target/debug`; zle widget **`ai-sessions`** runs the
+   `$SESSIONGATOR_BIN` → `target/release` → `target/debug` →
+   `sessiongator` on `PATH`; zle widget **`ai-sessions`** runs the
    picker, parses the selection line, and performs the resume `cd` + command.
 5. ⬜ **Dotfiles.** Point the session keybinding (e.g. `^s`) at the
-   `ai-sessions` widget; the dotfiles `gh_source` line already builds
-   `--release --workspace`, so the new binary appears without changes there.
-6. ✅ **AGENTS.md.** "Project Shape" updated to three implementation crates.
+   `ai-sessions` widget; `gh_source` can build `cargo build --release` when the
+   local binary is missing.
+6. ✅ **AGENTS.md.** Documents the standalone package, source adapters, native
+   import boundaries, checks, release trigger, and wrapper contracts.
 
 ## Module Layout (as built)
 
@@ -351,7 +347,7 @@ Follow the architecture spec and the `issuegator` pattern:
     unavailable; fixture DB round-trip.
   - Search: sessions-mode path/title matching; all-mode union with content;
     sort orderings; ISO↔epoch round-trip incl. leap day.
-  - Selection: exact `resume`/`path` lines for both tools; UI: truncation,
+  - Selection: exact `resume`/`resume-here`/`path` lines; UI: truncation,
     highlight spans (incl. multi-byte safety), first-match line index.
 - ✅ Live verification (tmux, real stores — 395 sessions): list + transcript
   render, path filter, sort cycle, content search live-updating during
