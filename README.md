@@ -33,6 +33,29 @@ SESSIONGATOR_THEME=light sessiongator
 
 Supported themes are `auto`, `light`, and `dark`. On non-macOS systems, `auto` currently uses the light palette.
 
+## Config
+
+Sessiongator reads `~/.config/sessiongator/config.toml` (or `$SESSIONGATOR_CONFIG`), creating a starter file on first run. Print the JSON Schema with `sessiongator config-schema`.
+
+```toml
+[ui]
+theme = "auto"
+
+[keybindings.global]
+"ctrl+s" = "cycle-sort"
+
+[keybindings.list]
+"ctrl+k" = "move-up"
+```
+
+Theme precedence is `--theme`, then `SESSIONGATOR_THEME`, then the config file, then `auto`.
+
+Each key chord maps to an action, and `"none"` disables a default so the key reaches the search input instead. Contexts are `global`, `list`, and `transcript`; a binding in `list` or `transcript` wins over the same chord in `global`.
+
+Actions: `cancel`, `resume`, `resume-here`, `show-path`, `convert`, `copy-id`, `toggle-search`, `cycle-sort`, `move-up`, `move-down`, `move-left`, `move-right`, `move-home`, `move-end`, `page-up`, `page-down`, `scroll-top`, `scroll-bottom`.
+
+The keys footer always reflects the active bindings.
+
 Dry-run a native conversion by session id:
 
 ```sh
