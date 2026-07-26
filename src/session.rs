@@ -19,7 +19,7 @@ use tui_input::{Input, InputRequest};
 use crate::model::{now_ms, sort_sessions, Session, SortMode, Tool};
 use crate::search::{filter_sessions, SearchMode};
 use crate::sources::{sources_from_env, Turn};
-use crate::ui::{session_layout, session_list_items, transcript_text, Palette};
+use crate::ui::{session_layout, session_list_items, transcript_text, Palette, Theme};
 
 struct SessionBatch {
     sessions: Vec<Session>,
@@ -148,9 +148,9 @@ fn spawn_content_index(targets: Vec<(Tool, String, String)>, tx: mpsc::Sender<Co
     });
 }
 
-pub fn select_session() -> AppResult<Option<String>> {
+pub fn select_session(theme: Theme) -> AppResult<Option<String>> {
+    let palette = Palette::for_theme(theme);
     let (mut terminal, _guard) = setup_terminal()?;
-    let palette = Palette::default_palette();
 
     let mut input = Input::default();
     let mut sessions: Vec<Session> = Vec::new();
@@ -290,6 +290,7 @@ pub fn select_session() -> AppResult<Option<String>> {
             frame.render_widget(left_block, ui.left);
 
             let search = Paragraph::new(input.value())
+                .style(Style::default().fg(palette.text))
                 .alignment(Alignment::Left)
                 .wrap(Wrap { trim: false });
             frame.render_widget(search, ui.search);

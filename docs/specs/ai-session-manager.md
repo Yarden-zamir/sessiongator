@@ -231,26 +231,23 @@ labor as `navgator` returning a path the wrapper `cd`s into.
 - Sessions-mode matching is substring-per-token over the full (untruncated)
   `cwd + ~cwd + title + model` blob (see the search rationale above).
 
-## Config (not built — zero-config only)
+## Config
 
-- Zero-config default. `$CLAUDE_CONFIG_DIR`, `$OPENCODE_DB`, `$XDG_DATA_HOME`
-  are honored. A config file is future work if needed:
-- Optional `figment`/`schemars` config
-  (`~/.config/navgator/sessions.toml` or a `[sessions]` table):
-  `claude_root`, `opencode_db` overrides, `default_sort`, `default_tool_filter`,
-  `include_reasoning`. Honor `$CLAUDE_CONFIG_DIR`, `$OPENCODE_DB`,
-  `$XDG_DATA_HOME`, `$XDG_CACHE_HOME`.
+- Zero-config default. `$CLAUDE_CONFIG_DIR`, `$OPENCODE_DB`, `$XDG_DATA_HOME`,
+  `$CODEX_HOME`, and `$COPILOT_HOME` are honored.
+- UI theme defaults to `auto`, follows macOS appearance, and falls back to the
+  light palette on other systems. `--theme auto|light|dark` overrides
+  `$SESSIONGATOR_THEME`; invalid values fail before terminal setup.
+- A TOML configuration file is not part of the current contract.
 
 ## Dependencies
 
-- Workspace already provides: `crossterm`, `ratatui`, `tui-input`, `serde`,
-  `serde_json`, `figment`, `schemars`, `libc`, `gator`.
-- **New:** `rusqlite` (with the `bundled` feature) for the opencode DB — the
-  first navgator crate to need SQLite. Keep it isolated to the opencode adapter
-  module. Add to `[workspace.dependencies]` and reference it only here.
-  🔴 Pinned to **0.37**: rusqlite 0.38+ pulls libsqlite3-sys ≥0.38 whose build
-  script uses `cfg_select!`, requiring Rust ≥1.94 (toolchain here is 1.93).
-  Bump when the toolchain moves.
+- Root package dependencies are `crossterm`, `gator`, `ratatui`, `rusqlite`,
+  `serde_json`, and `tui-input`; `Cargo.toml` is the source of truth.
+- `rusqlite` uses the `bundled` feature and stays confined to SQLite-backed
+  source and native-import code.
+- Theme parsing and macOS appearance detection use the standard library and add
+  no dependency.
 - Timestamps: keep epoch `i64` and format manually (as `issuegator` does
   with `short_timestamp`) to avoid a `chrono` dependency.
 

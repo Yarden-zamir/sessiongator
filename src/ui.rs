@@ -8,6 +8,26 @@ use ratatui::{
 use crate::model::{rel_time, shorten_home, Session};
 use crate::sources::Turn;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Theme {
+    Auto,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "light" => Ok(Self::Light),
+            "dark" => Ok(Self::Dark),
+            _ => Err(format!(
+                "invalid theme {value:?}; expected auto, light, or dark"
+            )),
+        }
+    }
+}
+
 pub struct Palette {
     pub accent: Color,
     pub warm: Color,
@@ -17,7 +37,15 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub fn default_palette() -> Self {
+    pub fn for_theme(theme: Theme) -> Self {
+        match theme {
+            Theme::Auto if os_prefers_dark_theme() => Self::dark(),
+            Theme::Auto | Theme::Light => Self::light(),
+            Theme::Dark => Self::dark(),
+        }
+    }
+
+    fn light() -> Self {
         Self {
             accent: Color::Rgb(72, 166, 255),
             warm: Color::Rgb(255, 181, 92),
@@ -25,6 +53,39 @@ impl Palette {
             muted: Color::Black,
             key: Color::Rgb(150, 150, 150),
         }
+    }
+
+    fn dark() -> Self {
+        Self {
+            accent: Color::Rgb(99, 179, 237),
+            warm: Color::Rgb(251, 191, 36),
+            key: Color::Rgb(156, 163, 175),
+            text: Color::Rgb(229, 231, 235),
+            muted: Color::Rgb(156, 163, 175),
+        }
+    }
+}
+
+fn os_prefers_dark_theme() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("defaults")
+            .arg("read")
+            .arg("-g")
+            .arg("AppleInterfaceStyle")
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .eq_ignore_ascii_case("Dark")
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
     }
 }
 
@@ -324,6 +385,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_theme_names() {
+        assert_eq!(Theme::parse("auto"), Ok(Theme::Auto));
+        assert_eq!(Theme::parse("light"), Ok(Theme::Light));
+        assert_eq!(Theme::parse("dark"), Ok(Theme::Dark));
+        assert!(Theme::parse("system").is_err());
+    }
+
+    #[test]
+    fn explicit_themes_match_navgator_palettes() {
+        let light = Palette::for_theme(Theme::Light);
+        assert_eq!(light.text, Color::Black);
+        assert_eq!(light.muted, Color::Black);
+        assert_eq!(light.accent, Color::Rgb(72, 166, 255));
+
+        let dark = Palette::for_theme(Theme::Dark);
+        assert_eq!(dark.text, Color::Rgb(229, 231, 235));
+        assert_eq!(dark.muted, Color::Rgb(156, 163, 175));
+        assert_eq!(dark.accent, Color::Rgb(99, 179, 237));
+    }
+
+    #[test]
     fn truncation() {
         assert_eq!(truncate_with_ellipsis("hello", 10), "hello");
         assert_eq!(truncate_with_ellipsis("hello world", 6), "hello…");
@@ -367,7 +449,7 @@ mod tests {
                 text: "the Needle is here".to_string(),
             },
         ];
-        let palette = Palette::default_palette();
+        let palette = Palette::for_theme(Theme::Light);
         let (text, first) = transcript_text(
             Some(&session),
             Some(&turns),
@@ -417,7 +499,7 @@ mod tests {
             role: "assistant".to_string(),
             text: "abcdefghijNEEDLE".to_string(),
         }];
-        let palette = Palette::default_palette();
+        let palette = Palette::for_theme(Theme::Light);
         let (text, first) = transcript_text(
             Some(&session),
             Some(&turns),

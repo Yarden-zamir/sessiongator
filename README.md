@@ -24,6 +24,15 @@ List sessions without the TUI:
 sessiongator --list
 ```
 
+The interactive picker defaults to `auto`, following the macOS appearance like navgator. Override it for terminals with a different background:
+
+```sh
+sessiongator --theme dark
+SESSIONGATOR_THEME=light sessiongator
+```
+
+Supported themes are `auto`, `light`, and `dark`. On non-macOS systems, `auto` currently uses the light palette.
+
 Dry-run a native conversion by session id:
 
 ```sh

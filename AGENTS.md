@@ -32,6 +32,7 @@
 
 ## UI And Wrapper Contracts
 
+- Theme modes and palettes match navgator: `auto` follows macOS appearance, explicit `light`/`dark` come from `--theme` then `$SESSIONGATOR_THEME`, and non-macOS `auto` falls back to light.
 - Search is substring-based, not `gator::fuzzy_match`; `SearchMode::All` unions transcript hits with title/path/model hits.
 - The TUI emits tab-separated selection lines consumed by `scripts/sessiongator.zsh`: `resume`, `resume-here`, `path`, and `convert`. Update the wrapper and `session.rs` tests together if the contract changes.
 - `Ctrl+T` should keep producing a dry-run `sessiongator convert ... --plan-json` command for the selected session.
