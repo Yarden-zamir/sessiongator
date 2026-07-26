@@ -57,6 +57,10 @@ fn resume_selection(session: &Session) -> String {
     )
 }
 
+fn resume_here_selection(session: &Session) -> String {
+    format!("resume-here\t{}\t{}\t", session.tool.name(), session.id)
+}
+
 fn path_selection(session: &Session) -> String {
     format!("path\t{}", session.source_ref)
 }
@@ -328,6 +332,7 @@ pub fn select_session() -> AppResult<Option<String>> {
             // Highlight the query in the transcript in every search mode, so
             // moving between results always shows where the text matched.
             let highlight = Some(input.value()).filter(|value| !value.trim().is_empty());
+            let transcript_width = ui.transcript.width.saturating_sub(2) as usize;
             let (text, first_match) = transcript_text(
                 session,
                 turns.map(Vec::as_slice),
@@ -335,6 +340,7 @@ pub fn select_session() -> AppResult<Option<String>> {
                 key.as_ref()
                     .is_some_and(|key| transcript_in_flight.contains(key)),
                 highlight,
+                transcript_width,
                 &palette,
             );
             let height = ui.transcript.height.saturating_sub(2) as usize;
@@ -368,8 +374,7 @@ pub fn select_session() -> AppResult<Option<String>> {
             let widget = Paragraph::new(text)
                 .block(block)
                 .alignment(Alignment::Left)
-                .scroll((transcript_scroll as u16, 0))
-                .wrap(Wrap { trim: false });
+                .scroll((transcript_scroll as u16, 0));
             frame.render_widget(widget, ui.transcript);
 
             let help = help_line(search_mode, sort_mode, &palette);
@@ -403,6 +408,15 @@ pub fn select_session() -> AppResult<Option<String>> {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             terminal.show_cursor()?;
                             return Ok(None);
+                        }
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if let Some(session) = filtered
+                                .get(selected)
+                                .and_then(|index| sessions.get(*index))
+                            {
+                                terminal.show_cursor()?;
+                                return Ok(Some(resume_here_selection(session)));
+                            }
                         }
                         KeyCode::Enter => {
                             if let Some(session) = filtered
@@ -631,6 +645,8 @@ fn help_line(search_mode: SearchMode, sort_mode: SortMode, palette: &Palette) ->
     Line::from(vec![
         Span::styled("enter", key_style),
         Span::styled(" resume  ", text_style),
+        Span::styled("^enter", key_style),
+        Span::styled(" resume here  ", text_style),
         Span::styled("^f", key_style),
         Span::styled(format!(" search:{}  ", search_mode.label()), accent),
         Span::styled("^s", key_style),
@@ -696,6 +712,10 @@ mod tests {
         assert_eq!(
             resume_selection(&claude),
             "resume\tclaude\tabc-123\t/Users/me/proj"
+        );
+        assert_eq!(
+            resume_here_selection(&claude),
+            "resume-here\tclaude\tabc-123\t"
         );
         let opencode = session(Tool::Opencode, "ses_1", "/w");
         assert_eq!(resume_selection(&opencode), "resume\topencode\tses_1\t/w");

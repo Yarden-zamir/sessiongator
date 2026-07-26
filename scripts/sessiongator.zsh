@@ -27,7 +27,8 @@ _sessiongator_bin() {
 
 # Widget: pick an AI session, then resume it in its original directory.
 # Selection lines from the binary:
-#   resume\t<tool>\t<id>\t<cwd>   (Enter)
+#   resume\t<tool>\t<id>\t<cwd>   (Enter, cd first)
+#   resume-here\t<tool>\t<id>\t<cwd>   (Ctrl+Enter, current directory)
 #   path\t<source path>           (Ctrl+O)
 #   convert\t<from>\t<default-to>\t<id>\t<cwd>   (Ctrl+T)
 ai-sessions() {
@@ -53,16 +54,18 @@ ai-sessions() {
 
   kind="${selection%%$'\t'*}"
   case "$kind" in
-    resume)
+    resume|resume-here)
       local rest="${selection#*$'\t'}"
       tool="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
       id="${rest%%$'\t'*}"
       dir="${rest#*$'\t'}"
-      if [[ -n "$dir" && ! -d "$dir" ]]; then
-        echo "session directory gone: $dir — resuming from \$HOME" >&2
-        dir="$HOME"
+      if [[ "$kind" == "resume" ]]; then
+        if [[ -n "$dir" && ! -d "$dir" ]]; then
+          echo "session directory gone: $dir — resuming from \$HOME" >&2
+          dir="$HOME"
+        fi
+        [[ -n "$dir" && -d "$dir" ]] && { cd -- "$dir" || return $?; }
       fi
-      [[ -n "$dir" && -d "$dir" ]] && { cd -- "$dir" || return $?; }
       case "$tool" in
         claude) BUFFER="claude --resume ${(q)id}" ;;
         opencode) BUFFER="opencode --session ${(q)id}" ;;

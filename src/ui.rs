@@ -143,27 +143,35 @@ pub fn transcript_text(
     error: Option<&str>,
     loading: bool,
     highlight: Option<&str>,
+    wrap_width: usize,
     palette: &Palette,
 ) -> (Text<'static>, Option<usize>) {
     let mut lines: Vec<Line> = Vec::new();
+    let wrap_width = wrap_width.max(1);
     let Some(session) = session else {
-        lines.push(Line::from(Span::styled(
+        push_wrapped_styled(
+            &mut lines,
             "No session selected",
             Style::default().fg(palette.muted),
-        )));
+            wrap_width,
+        );
         return (Text::from(lines), None);
     };
 
-    lines.push(Line::from(Span::styled(
+    push_wrapped_styled(
+        &mut lines,
         session.title.clone(),
         Style::default()
             .fg(palette.accent)
             .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
+        wrap_width,
+    );
+    push_wrapped_styled(
+        &mut lines,
         format!("{} · {}", session.tool.name(), shorten_home(&session.cwd)),
         Style::default().fg(palette.muted),
-    )));
+        wrap_width,
+    );
     let mut meta = Vec::new();
     if let Some(model) = &session.model {
         meta.push(model.clone());
@@ -173,31 +181,39 @@ pub fn transcript_text(
     for (key, value) in &session.extras {
         meta.push(format!("{key}={value}"));
     }
-    lines.push(Line::from(Span::styled(
+    push_wrapped_styled(
+        &mut lines,
         meta.join(" · "),
         Style::default().fg(palette.muted),
-    )));
+        wrap_width,
+    );
     lines.push(Line::default());
 
     if let Some(error) = error {
-        lines.push(Line::from(Span::styled(
+        push_wrapped_styled(
+            &mut lines,
             format!("error: {error}"),
             Style::default().fg(Color::Red),
-        )));
+            wrap_width,
+        );
         return (Text::from(lines), None);
     }
     let Some(turns) = turns else {
-        lines.push(Line::from(Span::styled(
-            if loading { "Loading transcript…" } else { "" }.to_string(),
+        push_wrapped_styled(
+            &mut lines,
+            if loading { "Loading transcript…" } else { "" },
             Style::default().fg(palette.muted),
-        )));
+            wrap_width,
+        );
         return (Text::from(lines), None);
     };
     if turns.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "(empty session)".to_string(),
+        push_wrapped_styled(
+            &mut lines,
+            "(empty session)",
             Style::default().fg(palette.muted),
-        )));
+            wrap_width,
+        );
         return (Text::from(lines), None);
     }
 
@@ -217,18 +233,53 @@ pub fn transcript_text(
             Style::default().fg(role_color).add_modifier(Modifier::BOLD),
         )));
         for raw_line in turn.text.lines() {
-            if first_match.is_none() {
-                if let Some(needle) = &needle {
-                    if raw_line.to_lowercase().contains(needle) {
-                        first_match = Some(lines.len());
+            for wrapped in wrap_text_line(raw_line, wrap_width) {
+                if first_match.is_none() {
+                    if let Some(needle) = &needle {
+                        if wrapped.to_lowercase().contains(needle) {
+                            first_match = Some(lines.len());
+                        }
                     }
                 }
+                lines.push(highlighted_line(&wrapped, highlight, palette.text));
             }
-            lines.push(highlighted_line(raw_line, highlight, palette.text));
         }
         lines.push(Line::default());
     }
     (Text::from(lines), first_match)
+}
+
+fn push_wrapped_styled(
+    lines: &mut Vec<Line<'static>>,
+    value: impl AsRef<str>,
+    style: Style,
+    width: usize,
+) {
+    for line in value.as_ref().lines() {
+        for wrapped in wrap_text_line(line, width) {
+            lines.push(Line::from(Span::styled(wrapped, style)));
+        }
+    }
+}
+
+fn wrap_text_line(line: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for ch in line.chars() {
+        if current.chars().count() >= width {
+            chunks.push(current);
+            current = String::new();
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 /// Split a line into spans, rendering case-insensitive `needle` matches in
@@ -323,6 +374,7 @@ mod tests {
             None,
             false,
             Some("needle"),
+            80,
             &palette,
         );
         let line = first.expect("match line");
@@ -334,8 +386,55 @@ mod tests {
             .collect();
         assert!(rendered.to_lowercase().contains("needle"));
         // no highlight → no match index
-        let (_, none) = transcript_text(Some(&session), Some(&turns), None, false, None, &palette);
+        let (_, none) = transcript_text(
+            Some(&session),
+            Some(&turns),
+            None,
+            false,
+            None,
+            80,
+            &palette,
+        );
         assert_eq!(none, None);
+    }
+
+    #[test]
+    fn transcript_match_line_counts_wrapped_rows() {
+        use crate::model::{Session, Tool};
+        let session = Session {
+            tool: Tool::Claude,
+            id: "x".to_string(),
+            title: "T".to_string(),
+            cwd: "/w".to_string(),
+            created_ms: 0,
+            updated_ms: 0,
+            message_count: 1,
+            model: None,
+            source_ref: String::new(),
+            extras: Vec::new(),
+        };
+        let turns = vec![Turn {
+            role: "assistant".to_string(),
+            text: "abcdefghijNEEDLE".to_string(),
+        }];
+        let palette = Palette::default_palette();
+        let (text, first) = transcript_text(
+            Some(&session),
+            Some(&turns),
+            None,
+            false,
+            Some("needle"),
+            10,
+            &palette,
+        );
+        let line = first.expect("wrapped match line");
+        let rendered: String = text.lines[line]
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert!(rendered.to_lowercase().contains("needle"));
+        assert!(line > 5, "match should account for wrapped rows");
     }
 
     #[test]
