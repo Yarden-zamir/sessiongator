@@ -1,8 +1,8 @@
 [package]
 name = "sessiongator"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "🐊 Rust TUI browser for Claude Code and opencode sessions"
+description = "🐊 Rust TUI browser for AI coding sessions"
 license = "MIT"
 repository = "https://github.com/Yarden-zamir/sessiongator"
 keywords = ["tui", "ratatui", "sessions", "claude", "opencode"]

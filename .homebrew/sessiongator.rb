@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 class Sessiongator < Formula
-  desc "Rust TUI browser for Claude Code and opencode sessions"
+  desc "Rust TUI browser for AI coding sessions"
   homepage "https://github.com/Yarden-zamir/sessiongator"
   url "{{URL}}"
   sha256 "{{SHA256}}"
