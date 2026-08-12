@@ -8,6 +8,10 @@ source_id="11111111-2222-4333-8444-555555555555"
 tmp="${TMPDIR:-/tmp}/sessiongator-native-import-latest-$$"
 
 cleanup() {
+  if [[ -n "${SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS:-}" && -d "$tmp/artifacts" ]]; then
+    mkdir -p "$SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS"
+    cp -R "$tmp/artifacts"/* "$SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS/" 2>/dev/null || true
+  fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -94,10 +98,13 @@ if env -u COPILOT_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
   --no-remote \
   --log-level none \
   > "$tmp/artifacts/copilot-missing-session.txt" 2>&1; then
+  cat "$tmp/artifacts/copilot-missing-session.txt" >&2
   echo "Copilot unexpectedly accepted a missing session" >&2
   exit 1
 fi
 
+mkdir -p "$tmp/artifacts/copilot-logs"
+set +e
 env -u COPILOT_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
   COPILOT_HOME="$tmp/copilot" copilot \
   --resume=66666666-7777-4888-8999-aaaaaaaaaaaa \
@@ -106,8 +113,18 @@ env -u COPILOT_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
   --no-custom-instructions \
   --disable-builtin-mcps \
   --no-remote \
-  --log-level none \
+  --log-level debug \
+  --log-dir "$tmp/artifacts/copilot-logs" \
   > "$tmp/artifacts/copilot-native-resume.txt" 2>&1
+set -e
+if grep -R -q -E "No session, task, or name matched|Failed to load workspace|Failed to initialize workspace|Session file is corrupted" \
+  "$tmp/artifacts/copilot-native-resume.txt" "$tmp/artifacts/copilot-logs"; then
+  cat "$tmp/artifacts/copilot-native-resume.txt" >&2
+  grep -R -E "No session, task, or name matched|Failed to load workspace|Failed to initialize workspace|Session file is corrupted" \
+    "$tmp/artifacts/copilot-logs" >&2 || true
+  echo "Copilot rejected the generated session" >&2
+  exit 1
+fi
 
 "$bin" convert \
   --from copilot \
@@ -118,9 +135,3 @@ env -u COPILOT_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
   --target-id 77777777-8888-4999-8aaa-bbbbbbbbbbbb \
   "${allow_args[@]}" \
   --report-json > "$tmp/artifacts/copilot-to-claude.json"
-
-if [[ -n "${SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS:-}" ]]; then
-  mkdir -p "$SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS"
-  cp "$tmp/artifacts"/*.json "$SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS/"
-  cp "$tmp/artifacts"/*.txt "$SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS/"
-fi

@@ -1768,7 +1768,7 @@ fn write_copilot_workspace(
     writeln!(file, "git_root: {}", quoted(&session.cwd)?)?;
     writeln!(file, "repository: {}", quoted(&session.cwd)?)?;
     writeln!(file, "host_type: github")?;
-    writeln!(file, "branch: null")?;
+    writeln!(file, "branch: \"\"")?;
     writeln!(file, "client_name: sessiongator")?;
     writeln!(file, "name: {}", quoted(&session.title)?)?;
     writeln!(file, "user_named: true")?;
