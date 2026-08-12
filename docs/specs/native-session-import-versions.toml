@@ -174,3 +174,39 @@ source = "local-sampling-and-full-native-parser-roundtrip"
 store = "sqlite"
 fixture_root = "fixtures/native-import/opencode/1.17.13"
 notes = "Full native parser probe passed dry-run and isolated target-store writes against the current SQLite import layout."
+
+[[tools]]
+tool = "claude"
+version = "2.1.228"
+status = "probe-passed"
+source = "ci-sessiongator-roundtrip"
+store = "jsonl-projects"
+fixture_root = "fixtures/native-import/claude/2.1.199"
+notes = "CI latest-tool probe passed dry-run and isolated target-store writes against the same projects JSONL layout as 2.1.199."
+
+[[tools]]
+tool = "opencode"
+version = "1.18.16"
+status = "target-supported"
+source = "ci-native-harness-export"
+store = "sqlite"
+fixture_root = "fixtures/native-import/opencode/1.17.13"
+notes = "CI initialized the isolated SQLite store through opencode, then opencode exported the sessiongator-written session successfully. Fresh target databases must be initialized by opencode before import."
+
+[[tools]]
+tool = "codex"
+version = "0.147.0"
+status = "probe-passed"
+source = "ci-sessiongator-roundtrip"
+store = "rollout-jsonl"
+fixture_root = "fixtures/native-import/codex/0.142.5"
+notes = "Sessiongator round-trip passed, but Codex app-server thread/read rejected the generated rollout as empty."
+
+[[tools]]
+tool = "copilot"
+version = "1.0.79"
+status = "target-supported"
+source = "ci-native-harness-resume"
+store = "session-store-sqlite-plus-session-state"
+fixture_root = "fixtures/native-import/copilot/1.0.68"
+notes = "copilot --resume discovered and parsed the isolated session without authentication or a model request; model continuation remains unverified."

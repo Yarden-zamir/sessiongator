@@ -343,27 +343,21 @@ jobs:
   fixtures:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test native_import -- --nocapture
 
   latest-tools:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install latest opencode
+      - name: Install latest harnesses
         run: |
-          # Use the official install path chosen during implementation.
-          # Capture `opencode --version` into artifacts/latest-tools.json.
-          true
-      - name: Install latest Claude Code
-        run: |
-          # Claude install may require auth/license constraints. If unavailable,
-          # mark as skipped and keep fixture tests authoritative.
-          true
-      - run: cargo test native_import_latest -- --nocapture
-      - uses: actions/upload-artifact@v4
+          npm install -g @anthropic-ai/claude-code opencode-ai @openai/codex @github/copilot
+      - run: cargo build --release
+      - run: scripts/probe-native-import-latest.sh
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: native-import-latest-report
@@ -372,12 +366,16 @@ jobs:
 
 Daily CI responsibilities:
 
-- Install latest available tool versions where licensing/auth allows.
+- Install the latest Claude Code, opencode, Codex, and Copilot CLI versions.
 - Run fixture-backed conversions in isolated source and target stores with unsupported-version override enabled for the probe only.
 - Run fixture imports into isolated target stores.
+- Initialize fresh opencode target databases through the installed opencode CLI before import, then require `opencode export <session-id>` to accept the written session.
+- Run `copilot --resume=<id>` without Copilot credentials or a terminal and require successful local parsing; do not submit a prompt or require an entitlement.
 - Verify target tool can list/resume or at least parse/read back imported sessions without crashing.
 - Compare detected schemas against the known-version manifest.
-- If latest passes but is unknown, update `docs/specs/native-session-import-versions.toml` and open a pull request that includes:
+- If sessiongator readback passes but native harness validation has not passed, record the version as `probe-passed`; do not mark it `target-supported`.
+- Promote a version to `target-supported` only after the target harness itself lists, reads, or resumes the generated session without submitting a model prompt.
+- Open a pull request for new probe results that includes:
   - detected versions
   - schema fingerprint
   - fixture result summary
@@ -407,7 +405,7 @@ Daily CI responsibilities:
 - Native target readback matches the conversion report for every fixture.
 - Live writes create backups and verify readback before success.
 - TUI conversion is available without breaking current resume/path/copy behavior.
-- Daily CI validates latest known tool versions and opens a reviewable manifest-update PR for unknown passing versions.
+- Daily CI records latest-tool round trips and opens a reviewable manifest-update PR; only native-harness validation can promote target support.
 
 ## Open Questions
 

@@ -23,6 +23,8 @@ for (let index = 2; index < process.argv.length; index += 1) {
 const latest = [
   toolEntry("claude", args.get("claude")),
   toolEntry("opencode", args.get("opencode")),
+  toolEntry("codex", args.get("codex")),
+  toolEntry("copilot", args.get("copilot")),
 ].filter(Boolean);
 
 if (latest.length === 0) {
@@ -32,12 +34,20 @@ if (latest.length === 0) {
 
 let manifest = fs.readFileSync(manifestPath, "utf8");
 const additions = [];
+const newEntries = [];
 
 for (const entry of latest) {
-  if (hasExactToolVersion(manifest, entry.tool, entry.version)) {
+  const currentStatus = toolVersionStatus(manifest, entry.tool, entry.version);
+  if (currentStatus === entry.status) {
+    continue;
+  }
+  if (currentStatus !== null) {
+    manifest = replaceToolVersionEntry(manifest, entry);
+    additions.push(renderEntry(entry));
     continue;
   }
   additions.push(renderEntry(entry));
+  newEntries.push(renderEntry(entry));
 }
 
 if (additions.length === 0) {
@@ -45,8 +55,12 @@ if (additions.length === 0) {
   process.exit(0);
 }
 
-manifest = `${manifest.trimEnd()}\n\n${additions.join("\n")}`;
-fs.writeFileSync(manifestPath, `${manifest}\n`);
+if (newEntries.length > 0) {
+  manifest = `${manifest.trimEnd()}\n\n${newEntries.join("\n").trimEnd()}\n`;
+} else {
+  manifest = `${manifest.trimEnd()}\n`;
+}
+fs.writeFileSync(manifestPath, manifest);
 
 for (const addition of additions) {
   process.stdout.write(addition);
@@ -61,7 +75,8 @@ function toolEntry(tool, rawVersion) {
     return {
       tool,
       version,
-      source: "ci-latest-tools",
+      source: "ci-sessiongator-roundtrip",
+      status: "probe-passed",
       store: "jsonl-projects",
       fixtureRoot: "fixtures/native-import/claude/2.1.199",
       notes:
@@ -72,11 +87,36 @@ function toolEntry(tool, rawVersion) {
     return {
       tool,
       version,
-      source: "ci-latest-tools",
+      source: "ci-native-harness-export",
+      status: "target-supported",
       store: "sqlite",
       fixtureRoot: "fixtures/native-import/opencode/1.17.13",
       notes:
-        "CI latest-tool probe passed dry-run and isolated target-store writes against the current SQLite import layout.",
+        "CI initialized the isolated SQLite store through opencode, then opencode exported the sessiongator-written session successfully.",
+    };
+  }
+  if (tool === "codex") {
+    return {
+      tool,
+      version,
+      source: "ci-sessiongator-roundtrip",
+      status: "probe-passed",
+      store: "rollout-jsonl",
+      fixtureRoot: "fixtures/native-import/codex/0.142.5",
+      notes:
+        "CI latest-tool probe passed isolated rollout JSONL writes and readback through the Codex adapter.",
+    };
+  }
+  if (tool === "copilot") {
+    return {
+      tool,
+      version,
+      source: "ci-native-harness-resume",
+      status: "target-supported",
+      store: "session-store-sqlite-plus-session-state",
+      fixtureRoot: "fixtures/native-import/copilot/1.0.68",
+      notes:
+        "CI confirmed copilot --resume discovers and parses the isolated session without authentication or a model request.",
     };
   }
   throw new Error(`unsupported tool: ${tool}`);
@@ -91,15 +131,32 @@ function normalizeVersion(rawVersion) {
   return version.length > 0 ? version : null;
 }
 
-function hasExactToolVersion(manifest, tool, version) {
+function toolVersionStatus(manifest, tool, version) {
   const blocks = manifest.split("[[tools]]").slice(1);
-  return blocks.some((block) => {
+  const block = blocks.find((block) => {
     return (
       tomlValue(block, "tool") === tool &&
-      tomlValue(block, "version") === version &&
-      tomlValue(block, "status") === "target-supported"
+      tomlValue(block, "version") === version
     );
   });
+  return block ? tomlValue(block, "status") : null;
+}
+
+function replaceToolVersionEntry(manifest, entry) {
+  const marker = "[[tools]]";
+  const blocks = manifest.split(marker);
+  const index = blocks.findIndex((block, blockIndex) => {
+    return (
+      blockIndex > 0 &&
+      tomlValue(block, "tool") === entry.tool &&
+      tomlValue(block, "version") === entry.version
+    );
+  });
+  if (index < 0) {
+    throw new Error(`missing manifest entry for ${entry.tool} ${entry.version}`);
+  }
+  blocks[index] = `\n${renderEntry(entry).slice(marker.length).trim()}\n\n`;
+  return blocks.join(marker).trimEnd();
 }
 
 function tomlValue(block, key) {
@@ -122,7 +179,7 @@ function renderEntry(entry) {
   return `[[tools]]
 tool = "${entry.tool}"
 version = "${entry.version}"
-status = "target-supported"
+status = "${entry.status}"
 source = "${entry.source}"
 store = "${entry.store}"
 fixture_root = "${entry.fixtureRoot}"

@@ -1741,10 +1741,10 @@ fn write_copilot_plan(
         .into());
     }
     fs::create_dir_all(&session_root)?;
-    write_sessiongator_events(
+    write_copilot_events(
         &session_root.join("events.jsonl"),
-        "copilot",
         &plan.target_session,
+        plan.target.cli_version.as_deref(),
     )?;
     write_copilot_workspace(&session_root.join("workspace.yaml"), &plan.target_session)?;
     write_copilot_session_db(&session_root.join("session.db"))?;
@@ -1762,8 +1762,99 @@ fn write_copilot_workspace(
     session: &NativeSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut file = fs::File::create(path)?;
-    writeln!(file, "cwd: {}", session.cwd)?;
-    writeln!(file, "summary: {}", session.title)?;
+    let quoted = |value: &str| serde_json::to_string(value);
+    writeln!(file, "id: {}", quoted(&session.id)?)?;
+    writeln!(file, "cwd: {}", quoted(&session.cwd)?)?;
+    writeln!(file, "git_root: {}", quoted(&session.cwd)?)?;
+    writeln!(file, "repository: {}", quoted(&session.cwd)?)?;
+    writeln!(file, "host_type: github")?;
+    writeln!(file, "branch: null")?;
+    writeln!(file, "client_name: sessiongator")?;
+    writeln!(file, "name: {}", quoted(&session.title)?)?;
+    writeln!(file, "user_named: true")?;
+    writeln!(file, "summary_count: 0")?;
+    writeln!(file, "created_at: {}", iso_utc(session.created_ms))?;
+    writeln!(file, "updated_at: {}", iso_utc(session.updated_ms))?;
+    file.flush()?;
+    Ok(())
+}
+
+fn write_copilot_events(
+    path: &Path,
+    session: &NativeSession,
+    target_version: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = fs::File::create(path)?;
+    let start_id = generated_uuid();
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "type": "session.start",
+            "data": {
+                "sessionId": session.id,
+                "version": 1,
+                "producer": "sessiongator",
+                "copilotVersion": target_version.unwrap_or_else(|| default_supported_version(ImportTool::Copilot)),
+                "startTime": iso_utc(session.created_ms),
+                "selectedModel": session.model.as_ref().map(|model| model.id.as_str()).unwrap_or("auto"),
+                "context": {
+                    "cwd": session.cwd,
+                    "gitRoot": session.cwd,
+                    "repository": session.cwd,
+                    "hostType": "github"
+                },
+                "alreadyInUse": false
+            },
+            "id": start_id,
+            "timestamp": iso_utc(session.created_ms),
+            "parentId": null
+        })
+    )?;
+    let mut parent_id = start_id;
+    for (index, message) in session.messages.iter().enumerate() {
+        let event_id = generated_uuid();
+        let interaction_id = generated_uuid();
+        let content = parts_text(&message.parts);
+        let event_type = match message.role {
+            NativeRole::User => "user.message",
+            NativeRole::Assistant => "assistant.message",
+            _ => continue,
+        };
+        let data = if message.role == NativeRole::User {
+            json!({
+                "content": content,
+                "transformedContent": content,
+                "attachments": [],
+                "supportedNativeDocumentMimeTypes": [],
+                "agentMode": "interactive",
+                "interactionId": interaction_id,
+                "sessiongatorParts": native_parts_to_json(&message.parts)
+            })
+        } else {
+            json!({
+                "messageId": generated_uuid(),
+                "model": session.model.as_ref().map(|model| model.id.as_str()).unwrap_or("imported"),
+                "content": content,
+                "toolRequests": [],
+                "interactionId": interaction_id,
+                "turnId": index.to_string(),
+                "sessiongatorParts": native_parts_to_json(&message.parts)
+            })
+        };
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": event_type,
+                "data": data,
+                "id": event_id,
+                "timestamp": iso_utc(message.created_ms),
+                "parentId": parent_id
+            })
+        )?;
+        parent_id = event_id;
+    }
     file.flush()?;
     Ok(())
 }
@@ -1815,7 +1906,7 @@ fn create_copilot_schema_if_missing(
     let count: i64 =
         connection.query_row("SELECT count(*) FROM schema_version", [], |row| row.get(0))?;
     if count == 0 {
-        connection.execute("INSERT INTO schema_version (version) VALUES (1)", [])?;
+        connection.execute("INSERT INTO schema_version (version) VALUES (6)", [])?;
     }
     Ok(())
 }
@@ -1855,7 +1946,7 @@ fn write_copilot_store_transaction(
             plan.target_session.id,
             plan.target_session.cwd,
             plan.target_session.cwd,
-            "local",
+            "github",
             plan.target_session.metadata.get("gitBranch").and_then(Value::as_str),
             plan.target_session.title,
             iso_utc(plan.target_session.created_ms),
@@ -1876,37 +1967,6 @@ fn write_copilot_store_transaction(
             params![plan.target_session.id, turn as i64, user, assistant, iso_utc(chunk[0].created_ms)],
         )?;
     }
-    Ok(())
-}
-
-fn write_sessiongator_events(
-    path: &Path,
-    tool: &str,
-    session: &NativeSession,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = fs::File::create(path)?;
-    writeln!(
-        file,
-        "{}",
-        json!({
-            "type": "session_meta",
-            "tool": tool,
-            "id": session.id,
-            "title": session.title,
-            "cwd": session.cwd,
-            "created_ms": session.created_ms,
-            "updated_ms": session.updated_ms,
-            "model": session.model.as_ref().map(model_json),
-        })
-    )?;
-    for message in &session.messages {
-        writeln!(
-            file,
-            "{}",
-            native_message_event_json("message", message, session)
-        )?;
-    }
-    file.flush()?;
     Ok(())
 }
 
@@ -1958,11 +2018,16 @@ fn native_message_from_event(value: &Value) -> Option<NativeMessage> {
                     .or_else(|| data.get("content"))
             })
             .and_then(value_text_content)?;
+        let parts = value
+            .get("data")
+            .and_then(|data| data.get("sessiongatorParts"))
+            .and_then(native_parts_from_json)
+            .unwrap_or_else(|| vec![NativePart::Text(text)]);
         return Some(NativeMessage {
             role,
             created_ms: event_timestamp_ms(value).unwrap_or_else(now_ms),
             updated_ms: None,
-            parts: vec![NativePart::Text(text)],
+            parts,
             metadata: BTreeMap::new(),
         });
     }
@@ -2465,6 +2530,16 @@ fn write_opencode_transaction(
 fn create_opencode_schema_if_missing(
     connection: &Connection,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let existing_tables: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )?;
+    if existing_tables == 0 {
+        return Err(
+            "fresh opencode target databases must be initialized by opencode before import".into(),
+        );
+    }
     connection.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL, vcs TEXT, name TEXT, icon_url TEXT, icon_color TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_initialized INTEGER, sandboxes TEXT NOT NULL DEFAULT '[]', commands TEXT, icon_url_override TEXT);
@@ -3080,6 +3155,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let db = root.join("opencode.db");
+        initialize_test_opencode_db(&db);
         let options = ConvertOptions {
             id: "source".to_string(),
             from: ImportTool::Claude,
@@ -3132,6 +3208,13 @@ mod tests {
         let receipt = write_copilot_plan(&options, plan).unwrap();
         assert!(PathBuf::from(&receipt.target_ref).is_dir());
         assert!(root.join("session-store.db").is_file());
+        let events = fs::read_to_string(
+            root.join("session-state/44444444-5555-4666-8777-888888888888/events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.lines().next().unwrap().contains("session.start"));
+        assert!(events.contains("user.message"));
+        assert!(!events.contains(r#""type":"message""#));
         let readback =
             read_copilot_session(Some(&root), "44444444-5555-4666-8777-888888888888").unwrap();
         assert_eq!(readback.title, "Imported Demo");
@@ -3313,6 +3396,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let db = root.join("opencode.db");
+        initialize_test_opencode_db(&db);
         let source = ToolVersion {
             tool: ImportTool::Claude,
             cli_version: Some(default_supported_version(ImportTool::Claude).to_string()),
@@ -3375,6 +3459,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let db = root.join("opencode.db");
+        initialize_test_opencode_db(&db);
         let claude_target = root.join("claude-target");
 
         let to_opencode = plan_from_session(
@@ -3633,5 +3718,14 @@ mod tests {
             "sessiongator-native-import-{name}-{}",
             std::process::id()
         ))
+    }
+
+    fn initialize_test_opencode_db(path: &Path) {
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);",
+            )
+            .unwrap();
     }
 }

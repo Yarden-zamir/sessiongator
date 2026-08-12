@@ -231,8 +231,8 @@ Fixtures must redact repository private URLs, GitHub usernames where not needed,
 ## CI Plan
 
 - Install latest Copilot CLI in the native import compatibility workflow when licensing/auth allows.
-- Prefer fixture tests for CI because real Copilot CLI may require authenticated entitlements and may consume credits.
-- If auth is available in a private/manual workflow, generate an isolated `COPILOT_HOME` session with a harmless prompt and no write permissions.
+- Validate local discovery without credentials by running `copilot --resume=<id>` without a terminal in an isolated `COPILOT_HOME`; require successful parsing and never submit a prompt.
+- If auth is available in a private/manual workflow, separately validate model continuation with a harmless prompt and no write permissions.
 - Run `sessiongator convert --from copilot --dry-run --plan-json` against fixtures and generated sessions.
 - Run target writes only into isolated `COPILOT_HOME` stores.
 - Verify readback through sessiongator first, then run Copilot's own resume/list verifier only if it is non-mutating.
