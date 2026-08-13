@@ -210,3 +210,21 @@ source = "ci-native-harness-resume"
 store = "session-store-sqlite-plus-session-state"
 fixture_root = "fixtures/native-import/copilot/1.0.68"
 notes = "copilot --resume discovered and parsed the isolated session without authentication or a model request; model continuation remains unverified."
+
+[[tools]]
+tool = "claude"
+version = "2.1.229"
+status = "target-supported"
+source = "ci-native-harness-resume"
+store = "jsonl-projects"
+fixture_root = "fixtures/native-import/claude/2.1.199"
+notes = "CI resumed the isolated generated session through Claude Code and received the exact no-tools probe response."
+
+[[tools]]
+tool = "opencode"
+version = "1.18.18"
+status = "target-supported"
+source = "ci-native-harness-export"
+store = "sqlite"
+fixture_root = "fixtures/native-import/opencode/1.17.13"
+notes = "CI initialized the isolated SQLite store through opencode, then opencode exported the sessiongator-written session successfully."
