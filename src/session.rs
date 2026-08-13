@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
     sync::mpsc,
     thread,
     time::Duration,
@@ -153,6 +154,7 @@ fn spawn_content_index(targets: Vec<(Tool, String, String)>, tx: mpsc::Sender<Co
 
 pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>> {
     let palette = Palette::for_theme(theme);
+    let project_root = std::env::current_dir().ok().map(current_project_root);
     let (mut terminal, _guard) = setup_terminal()?;
 
     let mut input = Input::default();
@@ -162,6 +164,7 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
     let mut selected = 0usize;
     let mut list_offset = 0usize;
     let mut sort_mode = SortMode::Updated;
+    let mut project_session_count = 0usize;
     let mut search_mode = SearchMode::All;
     let mut focus = Focus::List;
     let mut loading = true;
@@ -194,6 +197,8 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
             }
             sessions.extend(batch.sessions);
             sort_sessions(&mut sessions, sort_mode);
+            project_session_count =
+                promote_project_sessions(&mut sessions, project_root.as_deref(), 4);
             blobs = sessions.iter().map(Session::search_blob).collect();
             refilter = true;
             if batch.done {
@@ -303,7 +308,10 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
             }
 
             let list_height = ui.results.height as usize;
-            list_offset = list_window_offset(selected, list_offset, list_height, filtered.len());
+            let separator_at = separator_position(input.value(), &filtered, project_session_count);
+            let visual_selected = logical_to_visual(selected, separator_at);
+            let visual_len = filtered.len() + usize::from(separator_at.is_some());
+            list_offset = list_window_offset(visual_selected, list_offset, list_height, visual_len);
             let items = session_list_items(
                 &sessions,
                 &filtered,
@@ -312,9 +320,10 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
                 ui.results.width as usize,
                 now,
                 &palette,
+                separator_at,
             );
             let mut state = ListState::default();
-            state.select(selected.checked_sub(list_offset));
+            state.select(visual_selected.checked_sub(list_offset));
             let list = List::new(items).highlight_style(
                 Style::default()
                     .fg(ratatui::style::Color::Black)
@@ -480,6 +489,11 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
                                         .and_then(|index| sessions.get(*index))
                                         .map(Session::key);
                                     sort_sessions(&mut sessions, sort_mode);
+                                    project_session_count = promote_project_sessions(
+                                        &mut sessions,
+                                        project_root.as_deref(),
+                                        4,
+                                    );
                                     blobs = sessions.iter().map(Session::search_blob).collect();
                                     filtered = filter_sessions(
                                         &sessions,
@@ -570,8 +584,16 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
                         MouseEventKind::Down(MouseButton::Left) => {
                             if rect_contains(ui.results, mouse.column, mouse.row) {
                                 let row = mouse.row.saturating_sub(ui.results.y) as usize;
-                                selected =
-                                    (list_offset + row).min(filtered.len().saturating_sub(1));
+                                let separator_at = separator_position(
+                                    input.value(),
+                                    &filtered,
+                                    project_session_count,
+                                );
+                                if let Some(index) =
+                                    visual_to_logical(list_offset + row, separator_at)
+                                {
+                                    selected = index.min(filtered.len().saturating_sub(1));
+                                }
                                 transcript_scroll = 0;
                                 focus = Focus::List;
                             } else if rect_contains(ui.detail, mouse.column, mouse.row) {
@@ -625,6 +647,53 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
                 transcript_scroll = 0;
             }
         }
+    }
+}
+
+fn current_project_root(current_dir: PathBuf) -> PathBuf {
+    current_dir
+        .ancestors()
+        .find(|path| path.join(".git").exists())
+        .map(Path::to_path_buf)
+        .unwrap_or(current_dir)
+}
+
+fn promote_project_sessions(
+    sessions: &mut Vec<Session>,
+    project_root: Option<&Path>,
+    limit: usize,
+) -> usize {
+    let Some(project_root) = project_root else {
+        return 0;
+    };
+    let mut promoted = Vec::new();
+    let mut remaining = Vec::with_capacity(sessions.len());
+    for session in sessions.drain(..) {
+        if promoted.len() < limit && Path::new(&session.cwd).starts_with(project_root) {
+            promoted.push(session);
+        } else {
+            remaining.push(session);
+        }
+    }
+    let count = promoted.len();
+    promoted.append(&mut remaining);
+    *sessions = promoted;
+    count
+}
+
+fn separator_position(query: &str, filtered: &[usize], promoted: usize) -> Option<usize> {
+    (query.trim().is_empty() && promoted > 0 && promoted < filtered.len()).then_some(promoted)
+}
+
+fn logical_to_visual(index: usize, separator_at: Option<usize>) -> usize {
+    index + usize::from(separator_at.is_some_and(|separator| index >= separator))
+}
+
+fn visual_to_logical(index: usize, separator_at: Option<usize>) -> Option<usize> {
+    match separator_at {
+        Some(separator) if index == separator => None,
+        Some(separator) if index > separator => Some(index - 1),
+        _ => Some(index),
     }
 }
 
@@ -720,5 +789,48 @@ mod tests {
         assert_eq!(list_window_offset(15, 0, 10, 100), 6);
         assert_eq!(list_window_offset(3, 6, 10, 100), 3);
         assert_eq!(list_window_offset(0, 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn promotes_only_four_sessions_from_the_current_project() {
+        let root = Path::new("/work/project");
+        let mut sessions = vec![
+            session(Tool::Claude, "other-new", "/work/other"),
+            session(Tool::Claude, "project-1", "/work/project"),
+            session(Tool::Claude, "project-2", "/work/project/subdir"),
+            session(Tool::Claude, "project-3", "/work/project"),
+            session(Tool::Claude, "project-4", "/work/project"),
+            session(Tool::Claude, "project-5", "/work/project"),
+            session(Tool::Claude, "other-old", "/work/other"),
+        ];
+
+        assert_eq!(promote_project_sessions(&mut sessions, Some(root), 4), 4);
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "project-1",
+                "project-2",
+                "project-3",
+                "project-4",
+                "other-new",
+                "project-5",
+                "other-old"
+            ]
+        );
+    }
+
+    #[test]
+    fn separator_visual_row_is_not_selectable() {
+        let filtered = vec![0, 1, 2, 3, 4];
+        let separator = separator_position("", &filtered, 4);
+        assert_eq!(separator, Some(4));
+        assert_eq!(logical_to_visual(3, separator), 3);
+        assert_eq!(logical_to_visual(4, separator), 5);
+        assert_eq!(visual_to_logical(4, separator), None);
+        assert_eq!(visual_to_logical(5, separator), Some(4));
+        assert_eq!(separator_position("query", &filtered, 4), None);
     }
 }

@@ -18,6 +18,7 @@ pub fn session_layout(size: Rect) -> gator::layout::SplitLayout {
     gator::layout::split_layout(size, 55)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn session_list_items(
     sessions: &[Session],
     filtered: &[usize],
@@ -26,6 +27,7 @@ pub fn session_list_items(
     width: usize,
     now_ms: i64,
     palette: &Palette,
+    separator_at: Option<usize>,
 ) -> Vec<ListItem<'static>> {
     if filtered.is_empty() || height == 0 {
         return vec![ListItem::new(Line::from(Span::styled(
@@ -33,12 +35,28 @@ pub fn session_list_items(
             Style::default().fg(palette.muted),
         )))];
     }
-    let end = (offset + height).min(filtered.len());
-    filtered[offset..end]
-        .iter()
-        .filter_map(|index| sessions.get(*index))
-        .map(|session| session_row(session, width, now_ms, palette))
+    let visual_len = filtered.len() + usize::from(separator_at.is_some());
+    let end = (offset + height).min(visual_len);
+    (offset..end)
+        .filter_map(|visual_index| {
+            if separator_at == Some(visual_index) {
+                return Some(ListItem::new(Line::from(Span::styled(
+                    session_separator_label(),
+                    Style::default().fg(palette.muted),
+                ))));
+            }
+            let logical_index = visual_index
+                - usize::from(separator_at.is_some_and(|separator| visual_index > separator));
+            filtered
+                .get(logical_index)
+                .and_then(|index| sessions.get(*index))
+                .map(|session| session_row(session, width, now_ms, palette))
+        })
         .collect()
+}
+
+fn session_separator_label() -> &'static str {
+    "  ── other sessions"
 }
 
 fn session_row(
@@ -209,6 +227,22 @@ fn push_wrapped_styled(
 mod tests {
     use super::*;
 
+    fn session(id: &str) -> Session {
+        use crate::model::Tool;
+        Session {
+            tool: Tool::Claude,
+            id: id.to_string(),
+            title: id.to_string(),
+            cwd: "/work/project".to_string(),
+            created_ms: 0,
+            updated_ms: 0,
+            message_count: 0,
+            model: None,
+            source_ref: String::new(),
+            extras: Vec::new(),
+        }
+    }
+
     // Theme parsing, palette values, truncation, and match highlighting are
     // gator's contracts and are tested there.
 
@@ -305,5 +339,14 @@ mod tests {
             .collect();
         assert!(rendered.to_lowercase().contains("needle"));
         assert!(line > 5, "match should account for wrapped rows");
+    }
+
+    #[test]
+    fn session_list_renders_separator_between_groups() {
+        let sessions = vec![session("project"), session("other")];
+        let palette = Palette::for_theme(Theme::Light);
+        let items = session_list_items(&sessions, &[0, 1], 0, 3, 80, 0, &palette, Some(1));
+        assert_eq!(items.len(), 3);
+        assert_eq!(session_separator_label(), "  ── other sessions");
     }
 }

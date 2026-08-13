@@ -126,6 +126,9 @@ architecture spec's Phase 3 → 4).
     never dropped just because the body differs. See Search below.
 - **Sort modes** (compositor `Ctrl+S`, reusing the results-panel sort key):
   `updated → created → messages → path`.
+- On the unfiltered opening list, promote up to four sessions whose cwd is in
+  the current Git project, preserving the active sort within both groups, then
+  show a non-selectable separator before the remaining sessions.
 - `row_spec`: glyph per tool, relative `updated`, `~`-shortened cwd, title,
   dim `<msgs>m <model>` tail.
 
