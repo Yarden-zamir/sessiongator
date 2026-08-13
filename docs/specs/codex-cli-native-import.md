@@ -116,7 +116,7 @@ Writing to Codex requires at least:
 
 - A rollout JSONL under `sessions/<year>/<month>/<day>/rollout-<timestamp>-<thread-id>.jsonl`.
 - A first metadata line equivalent to Codex `SessionMeta`.
-- Canonical persisted rollout items for mapped messages/tool events.
+- Canonical top-level `session_meta`, `response_item`, and `event_msg` rollout envelopes for mapped messages; user/agent event messages provide Codex turn projection while response items retain model history.
 - Optional `session_index.jsonl` entry when a title/name is available.
 - Optional `state_5.sqlite` metadata upsert if the target version's state DB is initialized and schema-compatible.
 

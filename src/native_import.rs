@@ -1477,11 +1477,9 @@ fn write_codex_plan(
     let mut file = fs::File::create(&tmp)?;
     writeln!(file, "{}", codex_session_meta_json(&plan))?;
     for message in &plan.target_session.messages {
-        writeln!(
-            file,
-            "{}",
-            native_message_event_json("message", message, &plan.target_session)
-        )?;
+        for event in codex_message_event_json(message) {
+            writeln!(file, "{event}")?;
+        }
     }
     file.flush()?;
     fs::rename(&tmp, &path)?;
@@ -1511,23 +1509,72 @@ fn codex_filename_timestamp(epoch_ms: i64) -> String {
 
 fn codex_session_meta_json(plan: &ConversionPlan) -> Value {
     json!({
-        "item": {
-            "type": "session_meta",
-            "meta": {
-                "id": plan.target_session.id,
-                "session_id": plan.target_session.id,
-                "timestamp": iso_utc(plan.target_session.created_ms),
-                "cwd": plan.target_session.cwd,
-                "title": plan.target_session.title,
-                "originator": "sessiongator",
-                "cli_version": plan.target.cli_version.as_deref().unwrap_or_else(|| default_supported_version(ImportTool::Codex)),
-                "model_provider": plan.target_session.model.as_ref().and_then(|model| model.provider_id.as_deref()).unwrap_or("imported"),
-                "source": "Cli",
-                "history_mode": "legacy"
-            }
+        "timestamp": iso_utc(plan.target_session.created_ms),
+        "type": "session_meta",
+        "payload": {
+            "id": plan.target_session.id,
+            "session_id": plan.target_session.id,
+            "timestamp": iso_utc(plan.target_session.created_ms),
+            "cwd": plan.target_session.cwd,
+            "originator": "sessiongator",
+            "cli_version": plan.target.cli_version.as_deref().unwrap_or_else(|| default_supported_version(ImportTool::Codex)),
+            "model_provider": plan.target_session.model.as_ref().and_then(|model| model.provider_id.as_deref()).unwrap_or("imported"),
+            "source": "cli",
+            "history_mode": "legacy",
+            "sessiongator": provenance_json(plan),
+            "title": plan.target_session.title
         },
-        "sessiongator": provenance_json(plan),
     })
+}
+
+fn codex_message_event_json(message: &NativeMessage) -> Vec<Value> {
+    let role = match message.role {
+        NativeRole::User => "user",
+        NativeRole::Assistant => "assistant",
+        _ => return Vec::new(),
+    };
+    let content_type = if message.role == NativeRole::User {
+        "input_text"
+    } else {
+        "output_text"
+    };
+    let timestamp = iso_utc(message.created_ms);
+    let text = parts_text(&message.parts);
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    vec![
+        json!({
+            "timestamp": iso_utc(message.created_ms),
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": role,
+                "content": [{
+                    "type": content_type,
+                    "text": text
+                }]
+            }
+        }),
+        json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": if message.role == NativeRole::User {
+                json!({
+                    "type": "user_message",
+                    "message": text,
+                    "images": [],
+                    "local_images": [],
+                    "text_elements": []
+                })
+            } else {
+                json!({
+                    "type": "agent_message",
+                    "message": text
+                })
+            }
+        }),
+    ]
 }
 
 fn append_codex_session_index(
@@ -1985,22 +2032,6 @@ fn read_sessiongator_events(path: &Path) -> Result<Vec<NativeMessage>, Box<dyn s
     Ok(messages)
 }
 
-fn native_message_event_json(
-    kind: &str,
-    message: &NativeMessage,
-    session: &NativeSession,
-) -> Value {
-    json!({
-        "type": kind,
-        "role": native_role_name(&message.role),
-        "created_ms": message.created_ms,
-        "updated_ms": message.updated_ms,
-        "parts": native_parts_to_json(&message.parts),
-        "metadata": message.metadata,
-        "model": session.model.as_ref().map(model_json),
-    })
-}
-
 fn native_message_from_event(value: &Value) -> Option<NativeMessage> {
     if matches!(
         value.get("type").and_then(Value::as_str),
@@ -2150,17 +2181,6 @@ fn value_text_content(value: &Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     (!text.is_empty()).then_some(text)
-}
-
-fn native_role_name(role: &NativeRole) -> &str {
-    match role {
-        NativeRole::System => "system",
-        NativeRole::User => "user",
-        NativeRole::Assistant => "assistant",
-        NativeRole::Shell => "shell",
-        NativeRole::Compaction => "compaction",
-        NativeRole::Unknown(value) => value,
-    }
 }
 
 fn native_role_from_name(value: &str) -> NativeRole {
@@ -3191,6 +3211,15 @@ mod tests {
         let receipt = write_codex_plan(&options, plan).unwrap();
         assert!(PathBuf::from(&receipt.target_ref).is_file());
         assert!(root.join("session_index.jsonl").is_file());
+        let rollout = fs::read_to_string(&receipt.target_ref).unwrap();
+        assert!(rollout
+            .lines()
+            .next()
+            .unwrap()
+            .contains(r#""type":"session_meta""#));
+        assert!(rollout.contains(r#""type":"response_item""#));
+        assert!(rollout.contains(r#""type":"event_msg""#));
+        assert!(rollout.contains(r#""type":"user_message""#));
         let readback =
             read_codex_session(Some(&root), "33333333-4444-4555-8666-777777777777").unwrap();
         assert_eq!(readback.title, "Imported Demo");

@@ -101,15 +101,20 @@ function toolEntry(tool, rawVersion) {
     };
   }
   if (tool === "codex") {
+    const nativeValidated = args.get("codex-native") === "true";
     return {
       tool,
       version,
-      source: "ci-sessiongator-roundtrip",
-      status: "probe-passed",
+      source: nativeValidated
+        ? "ci-native-harness-read"
+        : "ci-sessiongator-roundtrip",
+      status: nativeValidated ? "target-supported" : "probe-passed",
       store: "rollout-jsonl",
       fixtureRoot: "fixtures/native-import/codex/0.142.5",
       notes:
-        "CI latest-tool probe passed isolated rollout JSONL writes and readback through the Codex adapter.",
+        nativeValidated
+          ? "Codex app-server thread/read projected non-empty turns from Claude, opencode, and Copilot-origin imports."
+          : "CI latest-tool probe passed isolated rollout JSONL writes and readback through the Codex adapter.",
     };
   }
   if (tool === "copilot") {

@@ -63,6 +63,7 @@ jobs:
             --claude-native true \
             --opencode "$OPENCODE_VERSION" \
             --codex "$CODEX_VERSION" \
+            --codex-native true \
             --copilot "$COPILOT_VERSION" \
             > artifacts/native-import-latest/manifest-additions.toml
       - run: cargo fmt -- --check

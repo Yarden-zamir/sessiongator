@@ -196,11 +196,11 @@ notes = "CI initialized the isolated SQLite store through opencode, then opencod
 [[tools]]
 tool = "codex"
 version = "0.147.0"
-status = "probe-passed"
-source = "ci-sessiongator-roundtrip"
+status = "target-supported"
+source = "manual-native-harness-matrix"
 store = "rollout-jsonl"
 fixture_root = "fixtures/native-import/codex/0.142.5"
-notes = "Sessiongator round-trip passed, but Codex app-server thread/read rejected the generated rollout as empty."
+notes = "Codex app-server thread/read projected non-empty turns from Claude, opencode, and Copilot-origin imports after native envelope validation."
 
 [[tools]]
 tool = "copilot"
