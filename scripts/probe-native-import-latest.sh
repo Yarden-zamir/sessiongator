@@ -58,6 +58,26 @@ OPENCODE_DB="$tmp/opencode/opencode.db" opencode export ses_ci_native_import \
   "${allow_args[@]}" \
   --report-json > "$tmp/artifacts/opencode-to-claude.json"
 
+if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  CLAUDE_CONFIG_DIR="$tmp/claude-from-opencode" claude \
+    --resume 33333333-4444-4555-8666-777777777777 \
+    --print "Reply with exactly SESSIONGATOR_OK" \
+    --tools "" \
+    --permission-mode plan \
+    --output-format json \
+    > "$tmp/artifacts/claude-native-resume.json"
+  node -e '
+    const fs = require("node:fs");
+    const result = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (result.is_error || result.result?.trim() !== "SESSIONGATOR_OK") {
+      throw new Error(`Claude native resume failed: ${result.result ?? "missing result"}`);
+    }
+  ' "$tmp/artifacts/claude-native-resume.json"
+elif [[ "${SESSIONGATOR_REQUIRE_CLAUDE_NATIVE:-0}" == "1" ]]; then
+  echo "ANTHROPIC_API_KEY is required for Claude native resume validation" >&2
+  exit 1
+fi
+
 "$bin" convert \
   --from claude \
   --to codex \

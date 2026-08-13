@@ -53,11 +53,14 @@ jobs:
       - name: Probe latest native import compatibility
         run: scripts/probe-native-import-latest.sh
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SESSIONGATOR_REQUIRE_CLAUDE_NATIVE: "1"
           SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS: artifacts/native-import-latest
       - name: Record sessiongator round-trip results
         run: |
           node scripts/update-native-import-versions.mjs \
             --claude "$CLAUDE_VERSION" \
+            --claude-native true \
             --opencode "$OPENCODE_VERSION" \
             --codex "$CODEX_VERSION" \
             --copilot "$COPILOT_VERSION" \

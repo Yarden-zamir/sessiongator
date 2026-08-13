@@ -72,15 +72,20 @@ function toolEntry(tool, rawVersion) {
     return null;
   }
   if (tool === "claude") {
+    const nativeValidated = args.get("claude-native") === "true";
     return {
       tool,
       version,
-      source: "ci-sessiongator-roundtrip",
-      status: "probe-passed",
+      source: nativeValidated
+        ? "ci-native-harness-resume"
+        : "ci-sessiongator-roundtrip",
+      status: nativeValidated ? "target-supported" : "probe-passed",
       store: "jsonl-projects",
       fixtureRoot: "fixtures/native-import/claude/2.1.199",
       notes:
-        "CI latest-tool probe passed dry-run and isolated target-store writes against the same projects JSONL layout as 2.1.199.",
+        nativeValidated
+          ? "CI resumed the isolated generated session through Claude Code and received the exact no-tools probe response."
+          : "CI latest-tool probe passed dry-run and isolated target-store writes against the same projects JSONL layout as 2.1.199.",
     };
   }
   if (tool === "opencode") {

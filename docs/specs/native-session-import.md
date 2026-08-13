@@ -370,6 +370,7 @@ Daily CI responsibilities:
 - Run fixture-backed conversions in isolated source and target stores with unsupported-version override enabled for the probe only.
 - Run fixture imports into isolated target stores.
 - Initialize fresh opencode target databases through the installed opencode CLI before import, then require `opencode export <session-id>` to accept the written session.
+- Use `ANTHROPIC_API_KEY` to resume the isolated generated Claude session with one fixed no-tools prompt and require the exact fixed response before promoting Claude target support.
 - Run `copilot --resume=<id>` without Copilot credentials or a terminal and require successful local parsing; do not submit a prompt or require an entitlement.
 - Verify target tool can list/resume or at least parse/read back imported sessions without crashing.
 - Compare detected schemas against the known-version manifest.
