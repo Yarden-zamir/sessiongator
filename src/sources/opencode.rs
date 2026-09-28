@@ -198,7 +198,7 @@ impl SessionSource for OpencodeSource {
             }
         }
         let mut sessions: Vec<Session> = by_id.into_values().collect();
-        sessions.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_ms));
         Ok(sessions)
     }
 
