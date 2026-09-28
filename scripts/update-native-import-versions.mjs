@@ -23,6 +23,7 @@ for (let index = 2; index < process.argv.length; index += 1) {
 const latest = [
   toolEntry("claude", args.get("claude")),
   toolEntry("opencode", args.get("opencode")),
+  toolEntry("opencode2", args.get("opencode2")),
   toolEntry("codex", args.get("codex")),
   toolEntry("copilot", args.get("copilot")),
 ].filter(Boolean);
@@ -98,6 +99,19 @@ function toolEntry(tool, rawVersion) {
       fixtureRoot: "fixtures/native-import/opencode/1.17.13",
       notes:
         "CI initialized the isolated SQLite store through opencode, then opencode exported the sessiongator-written session successfully.",
+    };
+  }
+  // OpenCode 2 keeps the `opencode` tool name; the version tells 1.x and 2.x apart.
+  if (tool === "opencode2") {
+    return {
+      tool: "opencode",
+      version,
+      source: "ci-native-harness-export",
+      status: "target-supported",
+      store: "sqlite-session-v2",
+      fixtureRoot: "fixtures/native-import/claude/2.1.199",
+      notes:
+        "CI initialized an isolated OpenCode 2 store with --standalone, then opencode session export decoded every sessiongator-written message.",
     };
   }
   if (tool === "codex") {

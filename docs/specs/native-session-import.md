@@ -366,6 +366,7 @@ jobs:
       - name: Install latest harnesses
         run: |
           npm install -g @anthropic-ai/claude-code opencode-ai @openai/codex @github/copilot
+          npm install --prefix "$RUNNER_TEMP/opencode2" @opencode/cli
       - run: cargo build --release
       - run: scripts/probe-native-import-latest.sh
       - uses: actions/upload-artifact@v7
@@ -381,6 +382,7 @@ Daily CI responsibilities:
 - Run fixture-backed conversions in isolated source and target stores with unsupported-version override enabled for the probe only.
 - Run fixture imports into isolated target stores.
 - Initialize fresh opencode target databases through the installed opencode CLI before import, then require `opencode export <session-id>` to accept the written session.
+- Probe OpenCode 2 (`@opencode/cli`, installed in its own npm prefix so the 1.x `opencode` stays on PATH) the same way: isolate every `XDG_*` directory, run each command with `--standalone`, initialize the store with `opencode2 session list`, import, then require `opencode2 session export <session-id>` to decode the session and convert it back to Claude.
 - Use `ANTHROPIC_API_KEY` to resume the isolated generated Claude session with one fixed no-tools prompt and require the exact fixed response before promoting Claude target support.
 - Run `copilot --resume=<id>` without Copilot credentials or a terminal and require successful local parsing; do not submit a prompt or require an entitlement.
 - Run Codex app-server `thread/read` for Claude, opencode, and Copilot-origin imports and require at least one projected non-empty turn.

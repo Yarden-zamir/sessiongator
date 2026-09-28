@@ -40,14 +40,21 @@ jobs:
           read -r _ codex_version <<< "$(codex --version)"
           read -r _ _ _ copilot_version <<< "$(copilot --version)"
           copilot_version="${copilot_version%.}"
+          # OpenCode 2 also ships an `opencode` bin; a separate prefix keeps
+          # the 1.x `opencode` on PATH.
+          npm install --prefix "$RUNNER_TEMP/opencode2" @opencode/cli
+          opencode2_bin="$RUNNER_TEMP/opencode2/node_modules/.bin/opencode2"
+          read -r _ opencode2_version <<< "$("$opencode2_bin" --version)"
           {
             printf 'CLAUDE_VERSION=%s\n' "$claude_version"
             printf 'OPENCODE_VERSION=%s\n' "$opencode_version"
+            printf 'OPENCODE2_BIN=%s\n' "$opencode2_bin"
+            printf 'OPENCODE2_VERSION=%s\n' "$opencode2_version"
             printf 'CODEX_VERSION=%s\n' "$codex_version"
             printf 'COPILOT_VERSION=%s\n' "$copilot_version"
           } >> "$GITHUB_ENV"
-          printf '{"claude":"%s","opencode":"%s","codex":"%s","copilot":"%s"}\n' \
-            "$claude_version" "$opencode_version" "$codex_version" "$copilot_version" \
+          printf '{"claude":"%s","opencode":"%s","opencode2":"%s","codex":"%s","copilot":"%s"}\n' \
+            "$claude_version" "$opencode_version" "$opencode2_version" "$codex_version" "$copilot_version" \
             > artifacts/native-import-latest/tool-versions.json
       - run: cargo build --release
       - name: Probe latest native import compatibility
@@ -62,6 +69,7 @@ jobs:
             --claude "$CLAUDE_VERSION" \
             --claude-native true \
             --opencode "$OPENCODE_VERSION" \
+            --opencode2 "$OPENCODE2_VERSION" \
             --codex "$CODEX_VERSION" \
             --codex-native true \
             --copilot "$COPILOT_VERSION" \
@@ -88,5 +96,6 @@ jobs:
             Detected versions:
             - Claude: `${{ env.CLAUDE_VERSION }}`
             - opencode: `${{ env.OPENCODE_VERSION }}`
+            - OpenCode 2: `${{ env.OPENCODE2_VERSION }}`
             - Codex: `${{ env.CODEX_VERSION }}`
             - Copilot: `${{ env.COPILOT_VERSION }}`

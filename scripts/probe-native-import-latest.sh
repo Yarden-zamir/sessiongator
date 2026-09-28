@@ -145,6 +145,62 @@ elif [[ "${SESSIONGATOR_REQUIRE_CLAUDE_NATIVE:-0}" == "1" ]]; then
   exit 1
 fi
 
+# OpenCode 2 (`@opencode/cli`) is installed off PATH so the 1.x `opencode`
+# above stays in use. OpenCode 2 connects to a shared background service by
+# default: `--standalone` keeps each command on a private server, and the XDG
+# directories isolate its store, config and state.
+if [[ -n "${OPENCODE2_BIN:-}" ]]; then
+  opencode2_home="$tmp/opencode2"
+  opencode2_db="$opencode2_home/data/opencode/opencode.db"
+  mkdir -p "$opencode2_home"/{data,state,config,cache} "$tmp/claude-from-opencode2"
+  opencode2() {
+    env -u OPENCODE_DB \
+      XDG_DATA_HOME="$opencode2_home/data" \
+      XDG_STATE_HOME="$opencode2_home/state" \
+      XDG_CONFIG_HOME="$opencode2_home/config" \
+      XDG_CACHE_HOME="$opencode2_home/cache" \
+      "$OPENCODE2_BIN" "$@" --standalone
+  }
+
+  opencode2 session list --format json > "$tmp/artifacts/opencode2-empty-session-list.json"
+
+  "$bin" convert \
+    --from claude \
+    --to opencode \
+    --id "$source_id" \
+    --source-store "$fixture" \
+    --target-store "$opencode2_db" \
+    --target-id ses_ci_opencode2 \
+    "${allow_args[@]}" \
+    --report-json > "$tmp/artifacts/claude-to-opencode2.json"
+
+  # Export decodes every stored message; one bad row fails the export.
+  opencode2 session export ses_ci_opencode2 > "$tmp/artifacts/opencode2-native-export.json"
+  node -e '
+    const fs = require("node:fs");
+    const exported = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const types = (exported.messages ?? []).map((message) => message.info?.type ?? message.type);
+    if (!types.includes("user") || !types.includes("assistant")) {
+      throw new Error(`OpenCode 2 export is missing user or assistant messages: ${types.join(", ")}`);
+    }
+  ' "$tmp/artifacts/opencode2-native-export.json"
+
+  "$bin" convert \
+    --from opencode \
+    --to claude \
+    --id ses_ci_opencode2 \
+    --source-store "$opencode2_db" \
+    --target-store "$tmp/claude-from-opencode2" \
+    --target-id cccccccc-dddd-4eee-8fff-000000000000 \
+    "${allow_args[@]}" \
+    --report-json > "$tmp/artifacts/opencode2-to-claude.json"
+
+  if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+    validate_claude_session \
+      "$tmp/claude-from-opencode2" cccccccc-dddd-4eee-8fff-000000000000 from-opencode2
+  fi
+fi
+
 "$bin" convert \
   --from claude \
   --to codex \
