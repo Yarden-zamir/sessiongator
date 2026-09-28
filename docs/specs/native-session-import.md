@@ -19,6 +19,7 @@ Local versions inspected:
 
 - Claude Code: `2.1.199`
 - opencode: `1.17.13`
+- opencode: `2.0.18` (2026-09-28)
 
 Upstream references inspected:
 
@@ -48,6 +49,15 @@ Local opencode structure observed for `1.17.13`:
 - Common `message.data` keys: `role`, `parentID`, `agent`, `modelID`, `providerID`, `mode`, `path`, `cost`, `tokens`, `tools`, `summary`, `finish`, `error`
 - Common `part.data` types: `text`, `reasoning`, `tool`, `patch`, `file`, `step-start`, `step-finish`, `compaction`
 - Current upstream `session_message` types: `agent-switched`, `model-switched`, `user`, `synthetic`, `system`, `shell`, `assistant`, `compaction`
+
+Local opencode structure observed for `2.0.18` (source: branch `v2` of anomalyco/opencode, `packages/core/src/database/v1-migration.bun.ts`, `packages/schema/src/session-message.ts`):
+
+- Same database path. Sessions live in `session_v2`. `session_message.session_id` has a foreign key to `session_v2`, not `session`.
+- The first 2.x start copies every 1.x session into `session_v2`/`session_message` once, then marks `kv['migration.v1-v2']` completed. The 1.x tables stay. A fresh 2.x database has no 1.x tables.
+- If 1.x tables appear later and the marker is absent, 2.x runs the copy again and first deletes every row in `event`. The writer must never create 1.x tables in a 2.x database.
+- `session_message.data` holds the message without `id` and `type` (those are columns). 2.x decodes each row with the `Session.Message.Info` schema and ignores unknown keys. One row that does not decode makes 2.x fail to load the whole session.
+- `event_sequence(aggregate_id = session id, seq)` must equal the highest `session_message.seq` of the session. 2.x numbers the next message after it.
+- `session_v2.agent` must be NULL or a known agent. 2.x refuses to prompt a session with an unknown agent (`AgentNotFoundError`).
 
 ## Non-Goals
 
@@ -231,6 +241,7 @@ This matrix is not a claim that import is implemented today. It is the initial c
 | opencode | `1.17.9` to `1.17.13` | Same local migration family observed | read-observed | Existing local sessions exist; write support requires fixture verification per version. |
 | opencode | `1.14.22` to `1.14.48` | Local rows observed in current DB after migrations | read-observed | Historical session versions can be read from migrated DB; do not write new sessions as these versions. |
 | opencode | `1.1.17` to `1.2.27` | Local rows observed in current DB after migrations | read-observed | Historical only. |
+| opencode | `2.0.18` | SQLite with `session_v2`, `session_message`, `event_sequence` | target-supported | A Claude fixture import into a fresh isolated 2.0.18 database decoded fully through `opencode session export --standalone`. The writer writes only the 2.x tables. Prompting an imported session is not verified. |
 
 ## Mapping Rules
 
@@ -413,6 +424,6 @@ Daily CI responsibilities:
 ## Open Questions
 
 - Claude Code does not document JSONL as a stable import API. Before enabling Claude target writes to live stores by default, verify imported fixtures can be resumed with `claude -r <id>` on each supported version.
-- opencode may rely on event projection tables beyond direct session/message rows. Confirm whether writing canonical `session_message` plus event rows is required for current and future resume flows.
+- opencode may rely on event projection tables beyond direct session/message rows. Confirm whether writing canonical `session_message` plus event rows is required for current and future resume flows. For `2.0.18`: `session_message` plus `event_sequence` is enough for `session export`; no `event` rows are written.
 - Decide whether imported hidden reasoning should be preserved by default, stripped by default, or controlled by `--include-reasoning`.
 - Decide whether tool results that include local file paths should copy sidecar files into the target store or reference original paths.

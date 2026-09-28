@@ -19,7 +19,7 @@
 ## Session Stores
 
 - Claude Code reads `$CLAUDE_CONFIG_DIR/projects`, else `~/.claude/projects`; the project folder encoding is lossy, so always read `cwd` from JSONL content.
-- opencode reads SQLite from `$OPENCODE_DB`, else `$XDG_DATA_HOME/opencode/opencode.db`, else `~/.local/share/opencode/opencode.db`; browser reads must stay read-only because live opencode may hold WAL state.
+- opencode reads SQLite from `$OPENCODE_DB`, else `$XDG_DATA_HOME/opencode/opencode.db`, else `~/.local/share/opencode/opencode.db`; browser reads must stay read-only because live opencode may hold WAL state. One database can hold 1.x tables (`session`/`message`/`part`) and OpenCode 2 tables (`session_v2`/`session_message`); `src/sources/opencode.rs` `newest_store` picks the newer copy of a session.
 - Codex listing reads `$CODEX_HOME` and `~/.codex` session JSONL trees; native import with `--source-store` or `--target-store` treats the path as one Codex root.
 - Copilot reads `$COPILOT_HOME`, else `~/.copilot`; list metadata comes from `session-store.db`, while transcripts prefer `session-state/<id>/events.jsonl` before DB turns.
 

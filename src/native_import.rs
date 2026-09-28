@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -12,6 +12,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::model::{clean_title, now_ms, parse_iso_utc_ms};
+use crate::sources::opencode::{newest_store, Store};
 
 const NATIVE_IMPORT_VERSIONS: &str =
     include_str!("../docs/specs/native-session-import-versions.toml");
@@ -758,13 +759,27 @@ fn opencode_store_version(
         return Ok((None, None));
     }
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let store_version = connection
-        .query_row(
-            "SELECT version FROM session WHERE version IS NOT NULL AND version != '' ORDER BY time_updated DESC LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
+    // OpenCode 2 keeps 1.x sessions in `session` and its own in `session_v2`.
+    let mut newest: Option<(i64, String)> = None;
+    for store in [Store::V1, Store::V2] {
+        let table = store.session_table();
+        if !table_exists(&connection, table)? {
+            continue;
+        }
+        let row = connection
+            .query_row(
+                &format!("SELECT time_updated, version FROM {table} WHERE version IS NOT NULL AND version != '' ORDER BY time_updated DESC LIMIT 1"),
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some(row) = row {
+            if newest.as_ref().is_none_or(|kept| row.0 >= kept.0) {
+                newest = Some(row);
+            }
+        }
+    }
+    let store_version = newest.map(|(_, version)| version);
     let mut statement = connection.prepare(
         "SELECT m.name, p.name, p.type, p.[notnull]
          FROM sqlite_master m JOIN pragma_table_info(m.name) p
@@ -790,15 +805,18 @@ fn read_opencode_session(
 ) -> Result<NativeSession, Box<dyn std::error::Error>> {
     let path = opencode_db_path(store);
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let table = newest_store(&connection, id)?
+        .ok_or_else(|| format!("opencode session not found: {id}"))?
+        .session_table();
     let (title, cwd, created_ms, updated_ms, model, version): (
-        String,
+        Option<String>,
         String,
         i64,
         i64,
         Option<String>,
         Option<String>,
     ) = connection.query_row(
-        "SELECT title, directory, time_created, time_updated, model, version FROM session WHERE id = ?1",
+        &format!("SELECT title, directory, time_created, time_updated, model, version FROM {table} WHERE id = ?1"),
         [id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
     )?;
@@ -810,7 +828,7 @@ fn read_opencode_session(
     Ok(NativeSession {
         tool: ImportTool::Opencode,
         id: id.to_string(),
-        title,
+        title: title.unwrap_or_default(),
         cwd,
         created_ms,
         updated_ms,
@@ -940,9 +958,17 @@ fn opencode_files(value: Option<&Value>) -> impl Iterator<Item = NativePart> + '
         .into_iter()
         .flatten()
         .map(|file| NativePart::File {
-            name: non_empty_string(file.get("filename")),
-            mime: non_empty_string(file.get("mediaType")),
-            url: non_empty_string(file.get("url")),
+            // OpenCode 2 writes `name`, `mime` and inline base64 `data`.
+            name: non_empty_string(file.get("name"))
+                .or_else(|| non_empty_string(file.get("filename"))),
+            mime: non_empty_string(file.get("mime"))
+                .or_else(|| non_empty_string(file.get("mediaType"))),
+            url: non_empty_string(file.get("url")).or_else(|| {
+                let data = non_empty_string(file.get("data"))?;
+                let mime = non_empty_string(file.get("mime"))
+                    .unwrap_or_else(|| "application/octet-stream".to_string());
+                Some(format!("data:{mime};base64,{data}"))
+            }),
             path: None,
         })
 }
@@ -2258,7 +2284,7 @@ fn map_session(
                 }
                 NativePart::ToolResult { .. } if target_tool == ImportTool::Opencode => {
                     warnings.push(
-                        "standalone tool results are imported as synthetic tool content"
+                        "tool results are imported into the state of their tool call; a call without a result reads as interrupted"
                             .to_string(),
                     );
                 }
@@ -2466,7 +2492,10 @@ fn write_opencode_plan(
         }
     }
     let count: i64 = connection.query_row(
-        "SELECT count(*) FROM session WHERE id = ?1",
+        &format!(
+            "SELECT count(*) FROM {} WHERE id = ?1",
+            opencode_target_store(&connection)?.session_table()
+        ),
         [plan.target_session.id.as_str()],
         |row| row.get(0),
     )?;
@@ -2486,65 +2515,113 @@ fn write_opencode_transaction(
     options: &ConvertOptions,
     plan: &ConversionPlan,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    create_opencode_schema_if_missing(connection)?;
+    let store = opencode_target_store(connection)?;
+    // A fresh OpenCode 2 database has no 1.x tables. Creating them would make
+    // OpenCode 2 run its one-time 1.x migration, which deletes every row in
+    // `event`.
+    if store == Store::V1 {
+        create_opencode_schema_if_missing(connection)?;
+    }
+    let table = store.session_table();
+    let session = &plan.target_session;
     let existing: Option<String> = connection
         .query_row(
-            "SELECT id FROM session WHERE id = ?1",
-            [plan.target_session.id.as_str()],
+            &format!("SELECT id FROM {table} WHERE id = ?1"),
+            [session.id.as_str()],
             |row| row.get(0),
         )
         .optional()?;
     if existing.is_some() {
         if !options.force {
-            return Err(format!(
-                "target opencode session already exists: {}",
-                plan.target_session.id
-            )
-            .into());
+            return Err(format!("target opencode session already exists: {}", session.id).into());
         }
+        // On OpenCode 2 the delete cascades to `session_message`.
         connection.execute(
-            "DELETE FROM session WHERE id = ?1",
-            [plan.target_session.id.as_str()],
+            &format!("DELETE FROM {table} WHERE id = ?1"),
+            [session.id.as_str()],
         )?;
     }
-    let project_id = ensure_opencode_project(
-        connection,
-        &plan.target_session.cwd,
-        plan.target_session.created_ms,
-    )?;
-    let model_json = plan
-        .target_session
+    let project_id = ensure_opencode_project(connection, &session.cwd, session.created_ms)?;
+    let model_json = session
         .model
         .as_ref()
         .map(|model| model_json(model).to_string());
+    // OpenCode 2 refuses to prompt a session with an agent it does not know
+    // (AgentNotFoundError). NULL selects the default agent.
+    let agent = match store {
+        Store::V1 => Some("imported"),
+        Store::V2 => None,
+    };
     connection.execute(
-        "INSERT INTO session
-         (id, project_id, slug, directory, title, version, time_created, time_updated, agent, model, metadata,
-          cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, 0, 0, 0, 0, 0)",
+        &format!(
+            "INSERT INTO {table}
+             (id, project_id, slug, directory, title, version, time_created, time_updated, agent, model, metadata,
+              cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, 0, 0, 0, 0, 0)"
+        ),
         params![
-            plan.target_session.id,
+            session.id,
             project_id,
-            slug(&plan.target_session.title),
-            plan.target_session.cwd,
-            plan.target_session.title,
-            plan
-                .target
+            slug(&session.title),
+            session.cwd,
+            session.title,
+            plan.target
                 .cli_version
                 .as_deref()
                 .unwrap_or_else(|| default_supported_version(ImportTool::Opencode)),
-            plan.target_session.created_ms,
-            plan.target_session.updated_ms,
-            "imported",
+            session.created_ms,
+            session.updated_ms,
+            agent,
             model_json,
             provenance_json(plan).to_string(),
         ],
     )?;
-    for (seq, message) in plan.target_session.messages.iter().enumerate() {
-        insert_opencode_session_message(connection, &plan.target_session, message, seq as i64 + 1)?;
-        insert_opencode_legacy_message(connection, &plan.target_session, message, seq as i64 + 1)?;
+    let results = tool_results(&session.messages);
+    for (index, message) in session.messages.iter().enumerate() {
+        let seq = index as i64 + 1;
+        insert_opencode_session_message(connection, session, message, seq, &results)?;
+        // OpenCode 2 never reads the 1.x tables after its one-time migration.
+        if store == Store::V1 {
+            insert_opencode_legacy_message(connection, session, message, seq)?;
+        }
+    }
+    if store == Store::V2 {
+        // OpenCode 2 numbers the next message after this sequence number.
+        connection.execute(
+            "INSERT INTO event_sequence (aggregate_id, seq) VALUES (?1, ?2)
+             ON CONFLICT(aggregate_id) DO UPDATE SET seq = excluded.seq, owner_id = NULL",
+            params![session.id, session.messages.len() as i64],
+        )?;
     }
     Ok(())
+}
+
+/// The table generation a new session goes to: OpenCode 2 once `session_v2` exists.
+fn opencode_target_store(connection: &Connection) -> Result<Store, rusqlite::Error> {
+    Ok(if table_exists(connection, "session_v2")? {
+        Store::V2
+    } else {
+        Store::V1
+    })
+}
+
+/// Tool results by call id. OpenCode 2 keeps a call and its result in one
+/// `tool` content item; Claude and Codex keep the result in a later message.
+type ToolResults<'a> = HashMap<&'a str, (&'a Value, bool)>;
+
+fn tool_results(messages: &[NativeMessage]) -> ToolResults<'_> {
+    messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            NativePart::ToolResult {
+                id,
+                content,
+                is_error,
+            } => Some((id.as_str(), (content, *is_error))),
+            _ => None,
+        })
+        .collect()
 }
 
 fn create_opencode_schema_if_missing(
@@ -2612,10 +2689,11 @@ fn insert_opencode_session_message(
     session: &NativeSession,
     message: &NativeMessage,
     seq: i64,
+    results: &ToolResults,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let id = generated_id("msg");
     let kind = opencode_message_type(&message.role);
-    let data = opencode_session_message_data(session, message);
+    let data = opencode_session_message_data(session, message, results);
     connection.execute(
         "INSERT INTO session_message (id, session_id, type, time_created, time_updated, data, seq) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![id, session.id, kind, message.created_ms, message.updated_ms.unwrap_or(message.created_ms), data.to_string(), seq],
@@ -2668,35 +2746,57 @@ fn opencode_message_type(role: &NativeRole) -> &'static str {
     }
 }
 
-fn opencode_session_message_data(session: &NativeSession, message: &NativeMessage) -> Value {
+/// `session_message.data` in the shape OpenCode 2 decodes
+/// (`@opencode/schema/session-message`). One row that does not decode makes
+/// OpenCode 2 fail to load the whole session. `sessiongatorParts` keeps the
+/// native parts for a lossless read back; OpenCode ignores unknown keys.
+fn opencode_session_message_data(
+    session: &NativeSession,
+    message: &NativeMessage,
+    results: &ToolResults,
+) -> Value {
+    let created = message.created_ms;
+    let parts = native_parts_to_json(&message.parts);
     match message.role {
         NativeRole::Assistant => json!({
             "agent": "imported",
             "model": session.model.as_ref().map(model_json).unwrap_or_else(|| json!({ "id": "imported", "providerID": "imported" })),
-            "content": message.parts.iter().filter_map(part_to_opencode_assistant_content).collect::<Vec<_>>(),
-            "sessiongatorParts": native_parts_to_json(&message.parts),
-            "time": { "created": message.created_ms, "completed": message.updated_ms.unwrap_or(message.created_ms) },
+            "content": message.parts.iter().filter_map(|part| part_to_opencode_assistant_content(part, created, results)).collect::<Vec<_>>(),
+            "sessiongatorParts": parts,
+            "time": { "created": created, "completed": message.updated_ms.unwrap_or(created) },
             "cost": 0,
             "tokens": { "input": 0, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
             "metadata": message.metadata,
         }),
         NativeRole::System => {
-            json!({ "text": parts_text(&message.parts), "sessiongatorParts": native_parts_to_json(&message.parts), "time": { "created": message.created_ms }, "metadata": message.metadata })
+            json!({ "text": parts_text(&message.parts), "sessiongatorParts": parts, "time": { "created": created }, "metadata": message.metadata })
         }
         NativeRole::Shell => {
-            json!({ "callID": generated_id("tool"), "command": parts_text(&message.parts), "output": "", "sessiongatorParts": native_parts_to_json(&message.parts), "time": { "created": message.created_ms, "completed": message.updated_ms }, "metadata": message.metadata })
+            let time = match message.updated_ms {
+                Some(completed) => json!({ "created": created, "completed": completed }),
+                None => json!({ "created": created }),
+            };
+            json!({ "shellID": generated_id("sh"), "command": parts_text(&message.parts), "status": "exited", "sessiongatorParts": parts, "time": time, "metadata": message.metadata })
         }
         NativeRole::Compaction => {
-            json!({ "reason": "manual", "summary": parts_text(&message.parts), "recent": "", "sessiongatorParts": native_parts_to_json(&message.parts), "time": { "created": message.created_ms }, "metadata": message.metadata })
+            json!({ "status": "completed", "reason": "manual", "summary": parts_text(&message.parts), "recent": "", "sessiongatorParts": parts, "time": { "created": created }, "metadata": message.metadata })
         }
-        _ => json!({
-            "text": parts_text(&message.parts),
-            "files": message.parts.iter().filter_map(part_to_opencode_file).collect::<Vec<_>>(),
-            "agents": [],
-            "sessiongatorParts": native_parts_to_json(&message.parts),
-            "time": { "created": message.created_ms },
-            "metadata": message.metadata,
-        }),
+        _ => {
+            let (files, notes) = opencode_attachments(&message.parts);
+            let text = std::iter::once(parts_text(&message.parts))
+                .chain(notes)
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            json!({
+                "text": text,
+                "files": files,
+                "agents": [],
+                "sessiongatorParts": parts,
+                "time": { "created": created },
+                "metadata": message.metadata,
+            })
+        }
     }
 }
 
@@ -2775,50 +2875,107 @@ fn native_part_from_json(value: &Value) -> Option<NativePart> {
     }
 }
 
-fn part_to_opencode_assistant_content(part: &NativePart) -> Option<Value> {
+/// A tool result has no item of its own: it travels in the state of its call.
+fn part_to_opencode_assistant_content(
+    part: &NativePart,
+    created: i64,
+    results: &ToolResults,
+) -> Option<Value> {
     match part {
-        NativePart::Text(text) => {
-            Some(json!({ "type": "text", "id": generated_id("prt"), "text": text }))
-        }
-        NativePart::Reasoning { text, metadata } => Some(
-            json!({ "type": "reasoning", "id": generated_id("prt"), "text": text, "providerMetadata": metadata }),
-        ),
-        NativePart::ToolCall { id, name, input } => Some(
-            json!({ "type": "tool", "id": id, "name": name, "state": { "status": "pending", "input": input }, "time": { "created": now_ms() } }),
-        ),
-        NativePart::ToolResult {
-            id,
-            content,
-            is_error,
-        } => Some(json!({
+        NativePart::Text(text) => Some(json!({ "type": "text", "text": text })),
+        NativePart::Reasoning { text, .. } => Some(json!({ "type": "reasoning", "text": text })),
+        NativePart::ToolCall { id, name, input } => Some(json!({
             "type": "tool",
             "id": id,
-            "name": "imported_tool_result",
-            "state": if *is_error {
-                json!({ "status": "error", "input": {}, "content": [], "structured": {}, "error": { "type": "unknown", "message": content_to_string(content) } })
-            } else {
-                json!({ "status": "completed", "input": {}, "content": [{ "type": "text", "text": content_to_string(content) }], "structured": {}, "result": content })
-            },
-            "time": { "created": now_ms(), "completed": now_ms() },
+            "name": name,
+            "state": opencode_tool_state(input, results.get(id.as_str()).copied()),
+            "time": { "created": created },
         })),
         _ => None,
     }
 }
 
-fn part_to_opencode_file(part: &NativePart) -> Option<Value> {
-    match part {
-        NativePart::File {
+/// OpenCode 2 has no "pending" tool state. A call without an imported result
+/// reads as interrupted, as in the OpenCode 2 migration of 1.x sessions.
+fn opencode_tool_state(input: &Value, result: Option<(&Value, bool)>) -> Value {
+    let input = match input {
+        Value::Object(_) => input.clone(),
+        Value::Null => json!({}),
+        other => json!({ "value": other }),
+    };
+    match result {
+        Some((content, false)) => json!({
+            "status": "completed",
+            "input": input,
+            "content": [{ "type": "text", "text": content_to_string(content) }],
+        }),
+        Some((content, true)) => json!({
+            "status": "error",
+            "input": input,
+            "error": { "type": "tool.execution", "message": content_to_string(content) },
+        }),
+        None => json!({
+            "status": "error",
+            "input": input,
+            "error": { "type": "tool.interrupted", "message": "sessiongator imported no result for this tool call" },
+        }),
+    }
+}
+
+/// OpenCode 2 attachments carry inline base64 data. A base64 `data:` URL
+/// becomes an attachment; any other file becomes a text note, as in the
+/// OpenCode 2 migration. Limit: a non-base64 `data:` URL also becomes a
+/// note; decode it here if imports with such files show up.
+fn opencode_attachments(parts: &[NativePart]) -> (Vec<Value>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut notes = Vec::new();
+    for part in parts {
+        let NativePart::File {
             name,
             mime,
             url,
             path,
-        } => Some(json!({
-            "filename": name,
-            "mediaType": mime.as_deref().unwrap_or("application/octet-stream"),
-            "url": url.as_ref().or(path.as_ref()),
-        })),
-        _ => None,
+        } = part
+        else {
+            continue;
+        };
+        let inline = url
+            .as_deref()
+            .and_then(|url| url.strip_prefix("data:"))
+            .and_then(|rest| rest.split_once(','))
+            .and_then(|(header, data)| {
+                header
+                    .strip_suffix(";base64")
+                    .map(|header_mime| (header_mime, data))
+            });
+        match inline {
+            Some((header_mime, data)) => {
+                let mime = mime
+                    .as_deref()
+                    .filter(|mime| !mime.is_empty())
+                    .or(Some(header_mime).filter(|mime| !mime.is_empty()))
+                    .unwrap_or("application/octet-stream");
+                let mut file =
+                    json!({ "data": data, "mime": mime, "source": { "type": "inline" } });
+                if let Some(name) = name {
+                    file["name"] = json!(name);
+                }
+                files.push(file);
+            }
+            None => {
+                let label = name
+                    .as_deref()
+                    .or(url.as_deref())
+                    .or(path.as_deref())
+                    .unwrap_or("file");
+                let mime = mime.as_deref().unwrap_or("unknown type");
+                notes.push(format!(
+                    "[Attachment unavailable after import: {label} ({mime})]"
+                ));
+            }
+        }
     }
+    (files, notes)
 }
 
 fn part_to_opencode_legacy_part(part: &NativePart) -> Option<Value> {
@@ -3199,6 +3356,103 @@ mod tests {
         assert_eq!(readback.title, "Imported Demo");
         assert_eq!(readback.cwd, "/tmp/sessiongator-demo");
         assert!(!readback.messages.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn writes_opencode_v2_session_that_opencode_2_can_decode() {
+        let root = temp_path("opencode-v2-write");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let db = root.join("opencode.db");
+        initialize_test_opencode_v2_db(&db);
+        let options = convert_options(ImportTool::Claude, ImportTool::Opencode, Some(db.clone()));
+        let mut plan = sample_plan(ImportTool::Opencode, "ses_v2_import");
+        plan.target_session.messages.extend([
+            NativeMessage {
+                role: NativeRole::Assistant,
+                created_ms: 1_783_000_000_500,
+                updated_ms: None,
+                parts: vec![
+                    NativePart::Text("running it".to_string()),
+                    NativePart::ToolCall {
+                        id: "call_1".to_string(),
+                        name: "Bash".to_string(),
+                        input: json!({ "command": "ls" }),
+                    },
+                    NativePart::ToolCall {
+                        id: "call_2".to_string(),
+                        name: "Bash".to_string(),
+                        input: Value::Null,
+                    },
+                ],
+                metadata: BTreeMap::new(),
+            },
+            NativeMessage {
+                role: NativeRole::User,
+                created_ms: 1_783_000_000_600,
+                updated_ms: None,
+                parts: vec![NativePart::ToolResult {
+                    id: "call_1".to_string(),
+                    content: json!("a.txt"),
+                    is_error: false,
+                }],
+                metadata: BTreeMap::new(),
+            },
+        ]);
+        write_opencode_plan(&options, plan).unwrap();
+
+        let connection = Connection::open(&db).unwrap();
+        let agent: Option<String> = connection
+            .query_row(
+                "SELECT agent FROM session_v2 WHERE id = 'ses_v2_import'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            agent, None,
+            "an unknown agent blocks prompting in OpenCode 2"
+        );
+        assert!(
+            !table_exists(&connection, "session").unwrap(),
+            "1.x tables make OpenCode 2 rerun its migration, which clears `event`"
+        );
+        let watermark: i64 = connection
+            .query_row(
+                "SELECT seq FROM event_sequence WHERE aggregate_id = 'ses_v2_import'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let last_seq: i64 = connection
+            .query_row(
+                "SELECT max(seq) FROM session_message WHERE session_id = 'ses_v2_import'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(watermark, last_seq);
+        let assistant: Value = connection
+            .query_row(
+                "SELECT data FROM session_message WHERE session_id = 'ses_v2_import' AND type = 'assistant'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|raw| serde_json::from_str(&raw).unwrap())
+            .unwrap();
+        let states: Vec<&str> = assistant["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["state"]["status"].as_str())
+            .collect();
+        assert_eq!(states, vec!["completed", "error"]);
+        assert_eq!(assistant["content"][2]["state"]["input"], json!({}));
+
+        let readback = read_opencode_session(Some(&db), "ses_v2_import").unwrap();
+        assert_eq!(readback.title, "Imported Demo");
+        assert_eq!(readback.messages.len(), 3);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3747,6 +4001,35 @@ mod tests {
             "sessiongator-native-import-{name}-{}",
             std::process::id()
         ))
+    }
+
+    /// The tables of a fresh OpenCode 2.0.18 database that the importer
+    /// touches. A fresh OpenCode 2 database has no 1.x tables.
+    fn initialize_test_opencode_v2_db(path: &Path) {
+        Connection::open(path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL, vcs TEXT, name TEXT,
+                    icon_url TEXT, icon_color TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,
+                    time_initialized INTEGER, sandboxes TEXT NOT NULL, commands TEXT, icon_url_override TEXT,
+                    time_active INTEGER DEFAULT 0 NOT NULL);
+                CREATE TABLE session_v2 (id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+                    workspace_id TEXT, parent_id TEXT, fork_session_id TEXT, fork_boundary TEXT,
+                    slug TEXT NOT NULL, directory TEXT NOT NULL, path TEXT, title TEXT,
+                    version TEXT NOT NULL, metadata TEXT, cost REAL DEFAULT 0 NOT NULL,
+                    tokens_input INTEGER DEFAULT 0 NOT NULL, tokens_output INTEGER DEFAULT 0 NOT NULL,
+                    tokens_reasoning INTEGER DEFAULT 0 NOT NULL, tokens_cache_read INTEGER DEFAULT 0 NOT NULL,
+                    tokens_cache_write INTEGER DEFAULT 0 NOT NULL, agent TEXT, model TEXT,
+                    time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+                CREATE TABLE session_message (id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES session_v2(id) ON DELETE CASCADE,
+                    type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+                CREATE UNIQUE INDEX session_message_session_seq_idx ON session_message(session_id, seq);
+                CREATE TABLE event_sequence (aggregate_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, owner_id TEXT);",
+            )
+            .unwrap();
     }
 
     fn initialize_test_opencode_db(path: &Path) {

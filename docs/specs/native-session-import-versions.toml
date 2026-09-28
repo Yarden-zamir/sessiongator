@@ -300,3 +300,11 @@ source = "ci-native-harness-resume"
 store = "session-store-sqlite-plus-session-state"
 fixture_root = "fixtures/native-import/copilot/1.0.68"
 notes = "CI confirmed copilot --resume discovers and parses the isolated session without authentication or a model request."
+
+[[tools]]
+tool = "opencode"
+version = "2.0.18"
+status = "target-supported"
+source = "local-v2-binary-export"
+store = "sqlite-session-v2"
+notes = "Isolated fresh 2.0.18 database: a Claude fixture import with tool calls wrote session_v2, session_message and event_sequence, and opencode session export --standalone decoded every message. Prompting an imported session was not tested (needs a model login)."

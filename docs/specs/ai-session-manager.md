@@ -71,6 +71,13 @@ directory name.
     compaction`. **`text` parts hold the searchable prompts/replies.**
 - Parse `part.data`/`message.data` JSON in Rust (do not rely on SQLite `json_extract`).
 - `session.parent_id` marks agent/child sessions.
+- **OpenCode 2** (`2.x`) writes `session_v2` (same columns, `title` nullable)
+  and `session_message(session_id, type, seq, time_updated, data)`. Its first
+  start copies every 1.x session into these tables once and keeps the 1.x
+  tables. List both generations; when an id is in both, use the copy with the
+  newer update time, and a tie reads as `session_v2`. The update time of a
+  `session_v2` row is the newest of `session_v2.time_updated` and its
+  `session_message.time_updated`. Message count = `user` + `assistant` rows.
 
 ## Unified Session (domain model)
 
@@ -159,7 +166,9 @@ architecture spec's Phase 3 → 4).
   brought on-screen (same approximation as navigate/issues).
 - Claude: stream `user`/`assistant` text from the JSONL in order. opencode:
   `SELECT … FROM part JOIN message … WHERE session_id=? ORDER BY time_created`,
-  `type='text'` (optionally `reasoning`).
+  `type='text'` (optionally `reasoning`). OpenCode 2: `session_message` rows
+  of type `user` (`data.text`) and `assistant` (`data.content[]` items with
+  `type='text'`), ordered by `seq`.
 - Optional sub-targets: one `ContentTarget` per turn for jump-to-match, or a
   future "raw / text-only / +reasoning" tab set.
 
@@ -344,7 +353,8 @@ Follow the architecture spec and the `issuegator` pattern:
     the folder name; text extraction excludes `thinking`/`tool_result`;
     corrupt JSONL lines skipped without dropping the session.
   - opencode: `model` JSON parsing; text-only transcript order; missing DB
-    unavailable; fixture DB round-trip.
+    unavailable; fixture DB round-trip; OpenCode 2 list and transcript, and
+    the newer copy wins for a session in both generations.
   - Search: sessions-mode path/title matching; all-mode union with content;
     sort orderings; ISO↔epoch round-trip incl. leap day.
   - Selection: exact `resume`/`resume-here`/`path` lines; UI: truncation,
