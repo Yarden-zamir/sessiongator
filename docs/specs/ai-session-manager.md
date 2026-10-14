@@ -6,8 +6,10 @@ Status: **implemented** (phases 1–5; provider traits deferred). See
 ## Goals
 
 - Add a third navgator implementation: a TUI to **browse, search, and resume**
-  every local [Claude Code](https://docs.claude.com/en/docs/claude-code) and
-  [opencode](https://opencode.ai) coding session from one window.
+  every local [Claude Code](https://docs.claude.com/en/docs/claude-code),
+  [opencode](https://opencode.ai), Codex CLI, and GitHub Copilot CLI coding
+  session from one window. The CLI commands (`list`, `search`, `show`,
+  `resume`, `path`) give the same functions without the TUI.
 - Prove the provider/compositor model (see
   [provider-compositor-architecture.md](./provider-compositor-architecture.md))
   on a **non-file-backed, multi-source** domain: results come from a JSONL log
@@ -23,7 +25,9 @@ Status: **implemented** (phases 1–5; provider traits deferred). See
 
 ## Non-Goals (first implementation)
 
-- No editing/merging/deleting sessions. Read-only, except our own cache.
+- No editing or merging sessions. The browser is read-only. Writes happen only
+  through `convert` (including `--mark-source` and `--delete-source`) and
+  `delete`, which move data to the sessiongator trash so `undo` can restore it.
 - No opencode legacy file-store reading (`storage/{session,message,part}/…` is
   stale/pre-migration). SQLite DB only.
 - No cloud sync, no web UI.
@@ -33,6 +37,10 @@ Status: **implemented** (phases 1–5; provider traits deferred). See
 
 Parsing truth is always the **content of the file/row**, never a decoded
 directory name.
+
+Codex and Copilot sources are specified in
+[codex-cli-native-import.md](./codex-cli-native-import.md) and
+[copilot-cli-native-import.md](./copilot-cli-native-import.md).
 
 ### Claude Code
 
@@ -50,7 +58,7 @@ directory name.
 - **Title:** `ai-title` event's `aiTitle` field; else first `user` **string**
   content (skip `tool_result` user events), truncated. Titles are
   whitespace-normalized (newlines/tabs collapsed) so they are always safe for
-  one-line rows and tab-separated `--list` output.
+  one-line rows and tab-separated `list` output.
 - **Model:** `assistant.message.model` (e.g. `claude-opus-4-8`).
 - **Searchable text:** `message.content` string, or `content[].text` where
   `type == "text"`. `thinking`/`tool_use`/`tool_result` blocks are excluded from
@@ -164,11 +172,11 @@ architecture spec's Phase 3 → 4).
   still-loading transcript arrives. Scroll offsets count logical lines, so
   heavy wrapping can place the match lower in the viewport — it is always
   brought on-screen (same approximation as navigate/issues).
-- Claude: stream `user`/`assistant` text from the JSONL in order. opencode:
-  `SELECT … FROM part JOIN message … WHERE session_id=? ORDER BY time_created`,
-  `type='text'` (optionally `reasoning`). OpenCode 2: `session_message` rows
-  of type `user` (`data.text`) and `assistant` (`data.content[]` items with
-  `type='text'`), ordered by `seq`.
+- Every tool: the transcript is `native::turns(Store::read(id))`, the text
+  parts of user and assistant messages in order. Reasoning, tool calls, tool
+  output, and control messages are not transcript text. Claude reads the
+  JSONL in order; opencode 1.x reads `message` with its `part` rows; OpenCode
+  2 reads `session_message` rows ordered by `seq`.
 - Optional sub-targets: one `ContentTarget` per turn for jump-to-match, or a
   future "raw / text-only / +reasoning" tab set.
 
@@ -191,6 +199,8 @@ architecture spec's Phase 3 → 4).
   panel focuses it.
 - Keybindings (route to providers / built-ins):
   - `Enter` → **resume** the selected session (selection contract below).
+  - `Ctrl+Enter` → resume in the current directory. `Ctrl+T` → place a
+    dry-run `sessiongator convert … --plan-json` command in the prompt.
   - `Ctrl+F` → toggle "search all" (name+path+content); `Ctrl+F` again back.
   - `Ctrl+S` → cycle sort. `Ctrl+Y` → copy session id (`copy_to_clipboard`).
   - `Ctrl+O` → return the source path instead of resuming (scripting).
@@ -208,17 +218,19 @@ navgator returns a selection via `gator::write_selection` (to
 `$GATOR_OUTPUT` or stdout); the shell wrapper acts on it. Resume is more than
 a path, so define a small typed line the wrapper interprets:
 
-- `SelectionValue` for a session:
-  `ProviderSpecific { provider_id: "sessions", value: "resume\t<tool>\t<id>\t<cwd>" }`
-  (or `path\t<source_ref>` for `Ctrl+O`).
+- Selection lines (tab-separated):
+  - `resume\t<tool>\t<id>\t<cwd>` (`Enter`)
+  - `resume-here\t<tool>\t<id>\t` (`Ctrl+Enter`)
+  - `path\t<source_ref>` (`Ctrl+O`)
+  - `convert\t<from>\t<default target>\t<id>\t<cwd>` (`Ctrl+T`)
 - Wrapper `sessiongator.zsh` (bound to a zsh key, e.g. `Ctrl+S`) parses
-  the value and runs:
-  - claude: `cd <cwd> && exec claude --resume <id>`
-  - opencode: `exec opencode <cwd> --session <id>`
-  - if `<cwd>` is gone: warn and resume from `$HOME`.
-
-Verified resume shapes: `claude --resume <session-id>` (run in the session cwd);
-`opencode <directory> --session <session-id>`.
+  the line, `cd`s into `<cwd>` for `resume`, and runs the resume command
+  through the prompt (`zle accept-line`). If `<cwd>` is gone, it warns and
+  resumes from `$HOME`.
+- Resume commands (`Tool::resume_command`; the wrapper keeps the same list):
+  `claude --resume <id>`, `opencode --session <id>`, `codex resume <id>`,
+  `copilot --resume=<id>`. `sessiongator resume` runs the same commands
+  directly.
 
 Rationale: the binary stays pure (returns a value); the wrapper performs the
 `cd`/`exec` so the resumed CLI lands in the user's terminal — same division of
@@ -227,7 +239,8 @@ labor as `navgator` returning a path the wrapper `cd`s into.
 ## Search
 
 - **Content index.** In-process and self-contained: after the session list
-  loads, one background worker extracts each session's searchable text
+  loads, up to eight background threads (`stores::read_transcripts`) extract
+  each session's searchable text
   (lowercased `text` content) and streams `(key, text)` entries over `mpsc`
   into an in-memory map. The list header shows `indexing…` until done, and
   active content searches live-refilter as entries arrive. The index is built
@@ -250,14 +263,21 @@ labor as `navgator` returning a path the wrapper `cd`s into.
 - UI theme defaults to `auto`, follows macOS appearance, and falls back to the
   light palette on other systems. `--theme auto|light|dark` overrides
   `$SESSIONGATOR_THEME`; invalid values fail before terminal setup.
-- A TOML configuration file is not part of the current contract.
+- A TOML config file (`~/.config/sessiongator/config.toml` or
+  `$SESSIONGATOR_CONFIG`, created on first run) sets the theme and
+  keybindings; `sessiongator config-schema` prints its JSON Schema. Theme
+  precedence: `--theme`, then `$SESSIONGATOR_THEME`, then the config file.
+- `$SESSIONGATOR_STATE_DIR` (else `$XDG_STATE_HOME/sessiongator`) holds the
+  undo history and the trash.
 
 ## Dependencies
 
-- Root package dependencies are `crossterm`, `gator`, `ratatui`, `rusqlite`,
+- Root package dependencies are `clap`, `clap_complete`, `crossterm`,
+  `figment`, `gator`, `ratatui`, `rusqlite`, `schemars`, `serde`,
   `serde_json`, and `tui-input`; `Cargo.toml` is the source of truth.
-- `rusqlite` uses the `bundled` feature and stays confined to SQLite-backed
-  source and native-import code.
+- `rusqlite` uses the `bundled` feature and stays confined to the SQLite
+  stores (`stores/opencode.rs`, `stores/copilot.rs`, `stores/sqlite.rs`) and
+  `trash.rs`.
 - Theme parsing and macOS appearance detection use the standard library and add
   no dependency.
 - Timestamps: keep epoch `i64` and format manually (as `issuegator` does
@@ -284,24 +304,30 @@ Everything below reflects the extracted standalone repository.
 5. ⬜ **Dotfiles.** Point the session keybinding (e.g. `^s`) at the
    `ai-sessions` widget; `gh_source` can build `cargo build --release` when the
    local binary is missing.
-6. ✅ **AGENTS.md.** Documents the standalone package, source adapters, native
-   import boundaries, checks, release trigger, and wrapper contracts.
+6. ✅ **AGENTS.md.** Documents the standalone package, stores, conversion
+   boundaries, checks, release trigger, and wrapper contracts.
 
 ## Module Layout (as built)
 
 Mirrors `issuegator` (self-contained) with adapter separation:
 
 ```text
-crates/sessiongator/
-  Cargo.toml
-  src/
-    main.rs        // CLI dispatch (--list/--help) → select_session() → write_selection()
-    model.rs       // Session, Tool, SortMode, clean_title, epoch↔civil time helpers
-    sources/
-      mod.rs       // SessionSource trait: tool(), available(), list(), transcript(id)
-      claude.rs    // JSONL scan (meta + transcript), corrupt-line tolerant
-      opencode.rs  // rusqlite read-only adapter (mode=ro, busy_timeout)
-    search.rs      // SearchMode, substring filter, content-map matching
+Cargo.toml
+src/
+    main.rs        // no command → select_session() → write_selection(); else cli::run()
+    config.rs      // config file, theme, keybindings (via gator)
+    keybindings.rs // actions and default chords
+    cli.rs         // clap commands: list, search, show, resume, path, convert, delete, undo, history, compat
+    model.rs       // Session, Tool, SortMode, clean_title, shell quoting
+    time.rs        // epoch↔civil time helpers
+    native.rs      // NativeSession model; transcript turns = user/assistant text parts
+    stores/
+      mod.rs       // Store trait: list(), read(id), write, footprint, append_note
+      claude.rs  opencode.rs  codex.rs  copilot.rs
+    convert/       // conversion and version policy
+    trash.rs       // move a session footprint to the trash and back
+    history.rs     // undo journal
+    search.rs      // SearchMode, substring filter, session references, snippets
     ui.rs          // layout, list rows, transcript render + highlight/first-match
     session.rs     // event loop, focus model, 3 mpsc workers, selection lines
 ```
@@ -309,19 +335,19 @@ crates/sessiongator/
 (The draft's separate `content.rs` folded into `ui.rs` — transcript rendering
 is one function; a module for it was indirection without duplication.)
 
-Adding a third AI tool later = one new file under `sources/` plus a line in
-`sources_from_env()`.
+Adding another AI tool = one new file under `stores/` plus a line in
+`stores::store_for()`.
 
 ## Async & Responsiveness Rules
 
 Follow the architecture spec and the `issuegator` pattern:
 
 - Event loop never runs external commands or DB/file scans directly.
-- Session list loads fast (metadata first); Claude scans stream in on an `mpsc`
-  channel; opencode is one query.
+- Session list loads fast (metadata first); each store's list arrives as one
+  batch on an `mpsc` channel.
 - Transcript loads async per selection (`spawn_transcript_load`, like
   `spawn_issue_detail_load`); emit `Loading` immediately.
-- Content **extraction** runs on a worker streaming `(key, text)` entries;
+- Content **extraction** runs on worker threads streaming `(key, text)` entries;
   matching is a per-frame in-memory scan on the main loop (events drained, one
   scan per frame). Late-arriving entries just refilter the active query.
 - Transcript results are keyed by session, so late arrivals apply safely.
@@ -329,7 +355,7 @@ Follow the architecture spec and the `issuegator` pattern:
 ## Implementation Phases
 
 1. ✅ **Adapters + list.** `Session` model, Claude + opencode adapters, merged
-   sorted list, `sessiongator --list` sanity dump. Unit-tested against
+   sorted list, `sessiongator --list` sanity dump (now `sessiongator list`). Unit-tested against
    fixtures (a tiny JSONL tree + a generated fixture DB).
 2. ✅ **TUI browse.** ratatui list, substring filter, sort cycle,
    `TerminalGuard`, `write_selection` of the source path (`Ctrl+O`).
@@ -345,9 +371,9 @@ Follow the architecture spec and the `issuegator` pattern:
 
 ## Verification
 
-- ✅ `cargo fmt -- --check`, `cargo check --workspace`,
-  `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
-  `cargo test --workspace` (20 crate tests), `cargo build --release --workspace`.
+- ✅ `cargo fmt -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo test` (79 tests on 2026-10-14), `cargo build --release`.
 - ✅ Behavior tests (in-crate):
   - Claude: `aiTitle` vs first-user-string title; `cwd` read from content, not
     the folder name; text extraction excludes `thinking`/`tool_result`;
@@ -357,24 +383,29 @@ Follow the architecture spec and the `issuegator` pattern:
     the newer copy wins for a session in both generations.
   - Search: sessions-mode path/title matching; all-mode union with content;
     sort orderings; ISO↔epoch round-trip incl. leap day.
-  - Selection: exact `resume`/`resume-here`/`path` lines; UI: truncation,
+  - Selection: exact `resume`/`resume-here`/`path`/`convert` lines; UI: truncation,
     highlight spans (incl. multi-byte safety), first-match line index.
 - ✅ Live verification (tmux, real stores — 395 sessions): list + transcript
   render, path filter, sort cycle, content search live-updating during
   indexing, highlight + scroll-to-match while moving between results, focus
-  borders/arrows, `Enter`/`GATOR_OUTPUT` selection lines, `--list` in
-  ~0.16s (release). Missing-cwd fallback lives in the wrapper (untested
-  end-to-end — needs a session whose directory was deleted).
+  borders/arrows, `Enter`/`GATOR_OUTPUT` selection lines, `--list` (now
+  `list`) in ~0.16s (release). Missing-cwd fallback lives in the wrapper
+  (untested end-to-end — needs a session whose directory was deleted).
+- ✅ 2026-10-14, after the store refactor: the picker driven in a
+  pseudo-terminal (1201 sessions) opened with `-q`, content search matched,
+  the transcript rendered with the highlight, and `Enter` wrote the `resume`
+  line to `GATOR_OUTPUT`.
 
 ## Design Guardrails
 
-- Read-only against both stores; open the opencode DB `mode=ro`.
+- The browser is read-only against every store; SQLite stores open
+  read-only for listing and reading. Only `convert` and `delete` write.
 - Core model must not assume files: a session id is a string, resume is a
   `SelectionValue`, not a path.
 - The compositor must not know Claude/opencode internals — adapters own their
   domain; the UI renders semantic `ContentBlock`s and metadata.
 - Prefer explicit structs over stringly-typed maps; keep `rusqlite` confined to
-  the opencode adapter.
+  the SQLite stores and `trash.rs`.
 - Background workers idempotent and safe to apply late; never block the loop.
 
 ## As-Built Notes (deviations from the draft)

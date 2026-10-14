@@ -27,6 +27,6 @@ class Sessiongator < Formula
   end
 
   test do
-    system "#{bin}/sessiongator", "--list"
+    assert_match version.to_s, shell_output("#{bin}/sessiongator --version")
   end
 end

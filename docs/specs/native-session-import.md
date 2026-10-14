@@ -4,12 +4,9 @@
 
 Add a native conversion/import feature that can take one session from a source AI coding tool, convert every representable field into the target tool's native storage format, save it safely, and expose the flow through both CLI and TUI.
 
-Initial tools:
+Tools: Claude Code, opencode, Codex CLI (`codex-cli-native-import.md`), and GitHub Copilot CLI (`copilot-cli-native-import.md`).
 
-- Claude Code
-- opencode
-
-The conversion must be version-gated. Unsupported or unknown source/target versions must fail closed unless the user explicitly opts into an experimental conversion.
+The conversion must be version-gated. An unsupported or unknown target version must fail closed unless the user explicitly opts into an experimental conversion. An untested source version only warns, because reading never changes the source store.
 
 ## Current Research Snapshot
 
@@ -45,7 +42,7 @@ Local opencode structure observed for `1.17.13`:
 
 - Database path: `$XDG_DATA_HOME/opencode/opencode.db`, defaulting to `~/.local/share/opencode/opencode.db`
 - Core tables relevant to imports: `project`, `project_directory`, `session`, `message`, `part`, `session_message`, `session_input`, `session_context_epoch`, `todo`, `event`, `event_sequence`
-- opencode retains legacy `message`/`part` rows and newer `session_message` rows. Import must write whichever format the target version actually reads for resume, and should populate compatibility projections when required by tested versions.
+- opencode retains legacy `message`/`part` rows and newer `session_message` rows. sessiongator reads both and writes OpenCode 2 tables only (see `2.0.18` below); a target database without `session_v2` fails with "start OpenCode 2 once to migrate it".
 - Common `message.data` keys: `role`, `parentID`, `agent`, `modelID`, `providerID`, `mode`, `path`, `cost`, `tokens`, `tools`, `summary`, `finish`, `error`
 - Common `part.data` types: `text`, `reasoning`, `tool`, `patch`, `file`, `step-start`, `step-finish`, `compaction`
 - Current upstream `session_message` types: `agent-switched`, `model-switched`, `user`, `synthetic`, `system`, `shell`, `assistant`, `compaction`
@@ -62,7 +59,7 @@ Local opencode structure observed for `2.0.18` (source: branch `v2` of anomalyco
 ## Non-Goals
 
 - Do not promise semantic losslessness. Tool runtimes have private state and replay semantics that are not identical.
-- Do not write into a live opencode database without an explicit lock/backup strategy.
+- Do not write into a live opencode database outside one `BEGIN IMMEDIATE` transaction. `undo --target` replaces a full backup.
 - Do not import hidden reasoning into target-visible transcript text. Preserve it only when the target has a native hidden/reasoning field.
 - Do not fabricate successful tool execution if the source only contains a pending/interrupted tool call.
 - Do not support unknown tool versions by default.
@@ -74,25 +71,30 @@ Local opencode structure observed for `2.0.18` (source: branch `v2` of anomalyco
 Add a `convert` command:
 
 ```sh
-sessiongator convert --id <session-id> --from <claude|opencode> --to <claude|opencode> [options]
+sessiongator convert [<session>] [--id <session-id>] [--from <tool>] [--to <tool>] [options]
 ```
+
+`<session>` is an id, a unique id prefix, `tool:id`, or text that matches exactly one session title, path, or model. It sets `--from` and `--id`. More than one match fails with a candidate list.
 
 Options:
 
+- `--from <tool>`: source tool. Default: the tool that owns `<session>`. `--from` and `--id` together skip the session lookup.
+- `--to <tool>`: target tool. Default: opencode for Claude sessions, else claude.
+
 - `--target-store <path>`: target config root or database. Defaults to the target tool's normal store.
-- `--source-store <path>`: source config root or database. Defaults to the source tool's normal store.
+- `--source-store <path>`: source config root or database. Defaults to the source tool's normal store. Requires `--from` and `--id`.
 - `--target-id <id>`: explicit target session id. Default: generate a native id.
 - `--cwd <path>`: override target session working directory. Default: source session cwd.
 - `--title <title>`: override target title. Default: mapped source title.
-- `--dry-run`: parse, validate, map, and print a conversion report without writing.
+- `--dry-run`: parse, validate, map, and print a conversion summary without writing. With `--plan-json`, print the plan JSON instead.
 - `--plan-json`: print the conversion plan as JSON for CI/golden tests.
 - `--report-json`: print the post-write verification report as JSON.
-- `--backup`: create target-store backup before writing. Default true for live stores.
-- `--no-backup`: only allowed with `--target-store` pointing to an isolated fixture/temp store.
+- `--mark-source`: after the write, append an assistant message to the source session that names the new session and its resume command. `sessiongator undo` removes the message.
+- `--delete-source`: after the write, move the source session to the sessiongator trash. `sessiongator undo` restores it. Conflicts with `--mark-source`.
+- `--backup`: copy the whole opencode database with `VACUUM INTO` before writing. Off by default: `sessiongator undo --target` removes a written session without a full copy.
 - `--force`: overwrite an existing target session id. Default false.
-- `--allow-unsupported-version`: run when source/target versions are unknown, marking the imported session as experimental.
-- `--include-sidecars`: include Claude tool-result/subagent sidecars where a target-native mapping exists.
-- `--redact-fixture`: export a sanitized fixture from the selected session instead of importing.
+- `--allow-unsupported-version`: run when the target version is unsupported, marking the imported session as experimental.
+- Not built: `--include-sidecars` (include Claude tool-result/subagent sidecars) and `--redact-fixture` (export a sanitized fixture).
 
 Examples:
 
@@ -108,10 +110,12 @@ Exit codes:
 - `1`: runtime/read/write failure.
 - `2`: invalid arguments.
 - `3`: unsupported source/target version.
-- `4`: lossy field would be dropped without an explicit policy.
-- `5`: target store is live/locked and cannot be safely written.
+- `4`: reserved: lossy field would be dropped without an explicit policy. Not used yet.
+- `5`: reserved: target store is live/locked and cannot be safely written. Not used yet.
 
 ### TUI
+
+As built: `Ctrl+T` places a dry-run `sessiongator convert ... --plan-json` command in the shell prompt. The dialog below is not built.
 
 Add conversion support to the current session picker:
 
@@ -130,118 +134,72 @@ Add conversion support to the current session picker:
 
 ## Architecture
 
-Add modules:
+As built:
 
 ```text
-src/import/
-  mod.rs
-  versions.rs
-  model.rs
-  report.rs
-  fixtures.rs
-  claude_reader.rs
-  claude_writer.rs
-  opencode_reader.rs
-  opencode_writer.rs
-  mapping.rs
+src/
+  native.rs          // NativeSession, NativeMessage, NativePart, transcript turns
+  stores/            // one Store per tool: list, read, write, footprint, append_note
+    claude.rs  opencode.rs  codex.rs  copilot.rs  sqlite.rs
+  convert/
+    mod.rs           // ConvertArgs, plan, mapping, write, mark/delete, reports
+    versions.rs      // manifest, Support, CLI version detection
+  trash.rs           // move a Footprint to the trash and back
+  history.rs         // operation journal for `undo` and `history`
 ```
 
-Key types:
+The browser and conversion share one `Store` trait per tool. `read` returns the full `NativeSession`; the TUI transcript is the text parts of its user and assistant messages (`native::turns`), so one reader serves both.
 
 ```rust
-enum ImportTool { Claude, Opencode }
-
-struct ToolVersion {
-    tool: ImportTool,
-    cli_version: Option<String>,
-    store_version: Option<String>,
-    schema_fingerprint: String,
-}
-
-struct NativeSession {
-    tool: ImportTool,
-    id: String,
-    title: String,
-    cwd: String,
-    created_ms: i64,
-    updated_ms: i64,
-    model: Option<ModelRef>,
-    messages: Vec<NativeMessage>,
-    attachments: Vec<NativeAttachment>,
-    todos: Vec<NativeTodo>,
-    sidecars: Vec<NativeSidecar>,
-    provenance: Provenance,
-}
-
-enum NativeMessage {
-    System(SystemMessage),
-    User(UserMessage),
-    Assistant(AssistantMessage),
-    Tool(ToolMessage),
-    Shell(ShellMessage),
-    Compaction(CompactionMessage),
-    Unknown(UnknownMessage),
-}
-
-struct ConversionReport {
-    source: ToolVersion,
-    target: ToolVersion,
-    supported: bool,
-    mapped: Vec<FieldMapping>,
-    dropped: Vec<FieldDrop>,
-    synthesized: Vec<SynthesizedField>,
-    warnings: Vec<String>,
-    errors: Vec<String>,
+trait Store {
+    fn list(&self) -> AppResult<Vec<Session>>;
+    fn read(&self, id: &str) -> AppResult<NativeSession>;
+    fn fingerprint(&self) -> AppResult<Fingerprint>;
+    fn write(&self, request: &WriteRequest) -> AppResult<Written>;
+    /// Files, SQLite rows, and JSONL lines that belong to one session.
+    fn footprint(&self, id: &str) -> AppResult<Footprint>;
+    /// Append one assistant message; returns the footprint of that message.
+    fn append_note(&self, id: &str, note: &Note) -> AppResult<Footprint>;
 }
 ```
 
-The existing `sources::SessionSource` stays read-only and summary-oriented. Native import should not overload it. It needs a richer `NativeReader` trait because import must preserve fields that the TUI preview intentionally ignores.
+### Delete, mark, and undo
 
-```rust
-trait NativeReader {
-    fn detect_version(&self) -> Result<ToolVersion, ImportError>;
-    fn read_native_session(&self, id: &str) -> Result<NativeSession, ImportError>;
-}
-
-trait NativeWriter {
-    fn detect_version(&self) -> Result<ToolVersion, ImportError>;
-    fn validate_target(&self, plan: &ConversionPlan) -> Result<(), ImportError>;
-    fn backup(&self) -> Result<Option<PathBuf>, ImportError>;
-    fn write_native_session(&self, session: &NativeSession) -> Result<WriteReceipt, ImportError>;
-    fn verify_written_session(&self, receipt: &WriteReceipt) -> Result<ConversionReport, ImportError>;
-}
-```
+- A `Footprint` lists paths, SQLite row sets (`table`, `column`, `value`, children before parents), and exact lines in shared JSONL files.
+- `trash` writes `record.json` with copies of every row and line first, then deletes rows with foreign keys off, removes lines, and moves paths into `<state dir>/trash/<time>-<name>/`. A failure halfway leaves enough to restore.
+- `restore` moves paths back, appends missing lines, and inserts each row set only when none of its rows exist. A second restore changes nothing.
+- `<state dir>/history.jsonl` records each conversion and delete. `<state dir>` is `$SESSIONGATOR_STATE_DIR`, else `$XDG_STATE_HOME/sessiongator`, else `~/.local/state/sessiongator`.
+- `undo [op]` reverts the newest open operation: it removes the migration note, restores a deleted source, and with `--target` also moves the converted session to the trash.
+- Limit: deleting an opencode session does not delete its child (subagent) sessions.
 
 ## Version Policy
 
-Version support lives in `docs/specs/native-session-import-versions.toml` until implementation. During implementation, copy or parse that file from runtime-visible assets.
+Version support lives in `docs/specs/native-session-import-versions.toml`. sessiongator compiles it in; rebuild after you change it. `sessiongator compat` prints the installed versions and the recorded ones.
 
-Version checks must include:
+Recorded statuses:
 
-- CLI version command output, when available.
-- Store version fields, when available.
-- Schema fingerprint derived from table names, column names/types/nullability, and migration names for SQLite stores.
-- Fixture compatibility hash for sanitized saved examples.
+- `verified`: a full pass (`scripts/full-pass-native-import.sh`) on a machine with real clients and model keys. The target tool resumed an imported session and answered with a code word that only the imported history holds, and sessiongator read the reply back. Only the full pass writes `verified`.
+- `probe-passed`: the daily CI probe (`scripts/probe-native-import-latest.sh`) converted every tool pair in isolated stores, and the target tool exported, read, or parsed each written session without model calls.
+- `read-observed`: sessions written by a version range were read. Source only.
 
-Default behavior:
+Derived statuses (sessiongator computes them; the manifest never holds them):
 
-- Exact known-good versions are allowed.
-- Patch versions may be allowed only when schema fingerprint and fixture round-trip checks match a known-good version.
-- Unknown versions fail closed with remediation text.
-- `--allow-unsupported-version` turns unsupported-version errors into warnings but still blocks destructive writes unless `--target-store` is isolated or `--backup` succeeds.
+- `bracketed`: between two `verified` versions of the same major version. Example: with `2.1.229` and `2.1.299` verified, `2.1.250` is bracketed. Bracketed counts as verified: both ends passed the full pass with the same store format.
+- `untested`: same major version as a `verified` or `probe-passed` version, and not older than the oldest one. Conversion runs with a warning that names the nearest known older version.
+- `unsupported`: no version detected, a major version without a recorded version, or older than the oldest known version of its major version.
+
+Rules:
+
+- Order of checks: `verified`, `bracketed`, `probe-passed`, `read-observed` (source only), `untested`, `unsupported`.
+- `verified`, `bracketed`, and `read-observed` convert without a warning. `probe-passed` and `untested` convert with a warning.
+- An unsupported target version fails closed with exit code `3`. `--allow-unsupported-version` turns that error into a warning.
+- The source version is the version that wrote the session (Claude event `version`, opencode `session.version`, Codex `cli_version`, Copilot `copilotVersion`). When the session has none, the installed CLI version is used. Source support never blocks; a source session with no readable messages fails.
+- The plan JSON reports `version`, `cliVersion`, `storeVersion`, `schemaFingerprint`, and `support` for `source` and `target`.
+- An entry only moves up (`probe-passed` to `verified`), never down.
 
 ## Initial Supported-Version Matrix
 
-This matrix is not a claim that import is implemented today. It is the initial compatibility target for implementation and CI fixtures.
-
-| Tool | Version | Store/schema | Status | Notes |
-| --- | --- | --- | --- | --- |
-| Claude Code | `2.1.199` | JSONL under `~/.claude/projects`, active session JSON under `~/.claude/sessions` | target-supported | Local schema sampled; CLI docs include `claude -r <session>` resume. Native import must be fixture-verified because transcript format is not documented as stable. |
-| opencode | `1.17.13` | SQLite with `session`, `message`, `part`, `session_message`, `session_input`, `session_context_epoch` | target-supported | Local DB schema and upstream Drizzle schema sampled. Writer must prefer current `session_message` model and maintain compatibility projections if required. |
-| opencode | `1.17.9` to `1.17.13` | Same local migration family observed | read-observed | Existing local sessions exist; write support requires fixture verification per version. |
-| opencode | `1.14.22` to `1.14.48` | Local rows observed in current DB after migrations | read-observed | Historical session versions can be read from migrated DB; do not write new sessions as these versions. |
-| opencode | `1.1.17` to `1.2.27` | Local rows observed in current DB after migrations | read-observed | Historical only. |
-| opencode | `2.0.18` | SQLite with `session_v2`, `session_message`, `event_sequence` | target-supported | A Claude fixture import into a fresh isolated 2.0.18 database decoded fully through `opencode session export --standalone`. The writer writes only the 2.x tables. Prompting an imported session is not verified. |
+Superseded by the manifest and `sessiongator compat`. OpenCode 1.x is `read-observed` only; sessiongator writes OpenCode 2.
 
 ## Mapping Rules
 
@@ -251,21 +209,21 @@ This matrix is not a claim that import is implemented today. It is the initial c
 | --- | --- | --- |
 | Session id UUID | `session.id` as generated `ses_*`; original id in metadata | Do not force Claude UUID into opencode id unless user passes `--target-id` and it matches opencode prefix rules. |
 | `cwd` | `session.directory`, `project.worktree`, `project_directory.directory` | Create/reuse project by cwd. |
-| `gitBranch` | session metadata | Preserve as metadata; opencode project has no direct branch column. |
+| `gitBranch` | session metadata | Not built: read into metadata, not written to opencode. |
 | `ai-title` / first user text | `session.title`, `session.slug` | Slug is derived from title. |
 | Event `timestamp` | message/session `time_created`, `time_updated` | Preserve per event; synthesize monotonic times for untimestamped parts. |
 | User text content | `session_message` type `user` with `text`, `files`, `agents` | File attachments map to `files` where possible. |
 | Assistant text content | `session_message` type `assistant`, content item `text` | Preserve ordering within the assistant event. |
-| Assistant `thinking` content | assistant content item `reasoning` | Preserve only as reasoning, not visible text. Include provider metadata/signature when present. |
-| `tool_use` block | assistant content item `tool` with pending/running/completed/error state | Match by `id` / `tool_use_id`. |
-| `tool_result` block | completion/error state on matching tool content | If no matching tool call exists, create synthetic tool result warning in metadata and report. |
-| `toolUseResult` top-level and `tool-results/*.txt` | tool output/content/attachments | Preserve text, output paths, and attachment references where opencode supports them. |
-| `attachment` events | user `files` or metadata | Preserve file name/mime/url/path where available. |
-| `file-history-snapshot` | session snapshot metadata | Do not create fake patches. Preserve raw snapshot metadata. |
-| `permission-mode`, `mode` | session permission/metadata | Map known permission modes only; unknown values become metadata. |
-| `system` events | `system` session messages or metadata | Preserve visible system text; preserve structured fields in metadata. |
-| Subagent JSONL sidecars | imported sidecar metadata or synthetic messages | Do not flatten into main transcript unless target supports subtask/subagent semantics. |
-| Usage/cost/model | assistant tokens/cost/model and session totals | Sum when target expects session totals. |
+| Assistant `thinking` content | assistant content item `reasoning` | Preserve only as reasoning, not visible text. The signature survives only in `sessiongatorParts`. |
+| `tool_use` block | assistant content item `tool` with completed/error state | Match by `id` / `tool_use_id`; a call without a result reads as interrupted (error). |
+| `tool_result` block | completion/error state on matching tool content | A result without a matching call is kept only in `sessiongatorParts`, not in opencode content. Not built: the warning for it. |
+| `toolUseResult` top-level and `tool-results/*.txt` | tool output/content/attachments | Not built: not read. |
+| `attachment` events | user `files` or metadata | Not built: `attachment` events are not read; `file` content blocks map to `files`. |
+| `file-history-snapshot` | session snapshot metadata | Not built: not read. Do not create fake patches. |
+| `permission-mode`, `mode` | session permission/metadata | Not built: not read. |
+| `system` events | `system` session messages | Visible system text maps; structured fields are not kept. |
+| Subagent JSONL sidecars | imported sidecar metadata or synthetic messages | Not built: not read. Do not flatten into the main transcript. |
+| Usage/cost/model | assistant tokens/cost/model and session totals | Model maps; tokens and cost are written as zero. |
 
 ### opencode to Claude Code
 
@@ -278,10 +236,10 @@ This matrix is not a claim that import is implemented today. It is the initial c
 | `session_message.user` | Claude `user` event with text/file content blocks | Preserve files as content blocks/attachment events when possible. |
 | `session_message.assistant.content.text` | Claude `assistant.message.content[].text` | Preserve order. |
 | `session_message.assistant.content.reasoning` | Claude `thinking` content block | Preserve provider metadata/signature when Claude accepts it; otherwise metadata sidecar and warning. |
-| `session_message.assistant.content.tool` | Claude `tool_use` / paired `tool_result` blocks | Convert completed/error/pending states; pending imports should be marked interrupted to avoid dangling tool calls. |
-| `shell` messages | Claude tool use/result for Bash when possible | Otherwise preserve as synthetic user-visible text with metadata warning. |
-| `compaction` | Claude summary/compaction-equivalent metadata | Native exact mapping unknown; preserve as metadata and optional visible synthetic summary. |
-| `todo` rows | Claude task/todo sidecar if schema known | Otherwise preserve in metadata sidecar and report as not natively mapped. |
+| `session_message.assistant.content.tool` | Claude `tool_use` block | The call maps; the tool state output is not read back as a `tool_result` unless sessiongator wrote the session (`sessiongatorParts`). |
+| `shell` messages | Claude user text `$ <command>` plus output | No Bash tool mapping; no warning. |
+| `compaction` | Claude user text with the summary | Native exact mapping unknown. |
+| `todo` rows | Claude task/todo sidecar if schema known | Not built: not read. |
 
 ## Safety Rules
 
@@ -291,11 +249,15 @@ This matrix is not a claim that import is implemented today. It is the initial c
   - Use `BEGIN IMMEDIATE` transaction.
   - Insert all rows, then verify by reading through the normal opencode reader path.
   - Roll back on any failed verification.
-  - Create a timestamped `.bak` beside the DB for live stores.
+  - Refuse a database without `session_v2`; never create 1.x tables.
+  - With `--backup`, copy the database with `VACUUM INTO` first.
 - For Claude target writes:
   - Never overwrite an existing JSONL unless `--force` is set.
   - Write to a temp file and atomic-rename into place.
   - Create sidecar directories only after transcript validation passes.
+- For `--mark-source`, `--delete-source`, and `delete`:
+  - Change the source only after the target write succeeds.
+  - Record the operation in the history even when the source change fails, so `undo --target` can remove the new session.
 - Imported sessions must include provenance metadata:
   - source tool/version/store fingerprint/session id
   - sessiongator version/commit when available
@@ -304,9 +266,9 @@ This matrix is not a claim that import is implemented today. It is the initial c
 
 ## Fixture Strategy
 
-Fixtures must be committed to git and sanitized. They are the source of truth for supported versions.
+Fixtures must be committed to git and sanitized. The manifest, the probe, and the full pass decide supported versions; fixtures pin reader and writer behavior.
 
-Proposed layout:
+As built: one fixture, `claude/2.1.199/basic-text` (text, reasoning, tool call, tool result), with `expected-opencode/plan-summary.json` checked by `fixture_plan_matches_the_expected_summary`. Other tools build test stores inline. Proposed layout:
 
 ```text
 fixtures/native-import/
@@ -337,95 +299,53 @@ Fixture rules:
 
 ## CI Strategy
 
-Add `.github/workflows/native-import-compat.yml`:
+`.github/workflows/native-import-compat.yml`:
 
-```yaml
-name: native import compatibility
+- `fixtures` job, on every push and pull request: `cargo test -- convert:: stores:: trash:: history::`.
+- `latest-tools` job, daily and on demand:
+  - Install the latest `@anthropic-ai/claude-code`, `@opencode/cli` (OpenCode 2), `@openai/codex`, and `@github/copilot`.
+  - Run `scripts/probe-native-import-latest.sh`: convert the Claude fixture to every tool, then every written session to every other tool. Every opencode command runs with `--standalone` and private `XDG_*` directories, because without `--standalone` OpenCode 2 talks to the shared background service and its real database.
+  - Check each written session with the target tool, without model calls: `opencode session export` decodes it, Codex app-server `thread/read` projects a non-empty turn, `copilot --resume=<id>` parses it without credentials, and sessiongator reads Claude targets back.
+  - Record the installed versions as `probe-passed` with `scripts/update-native-import-versions.mjs` and open a pull request. Never commit to `main` directly.
 
-on:
-  pull_request:
-  push:
-    branches: [main]
-  schedule:
-    - cron: "17 5 * * *"
-  workflow_dispatch:
+## Full Pass
 
-jobs:
-  fixtures:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test native_import -- --nocapture
+`scripts/full-pass-native-import.sh` runs on a machine with logged-in clients (a scheduled T3 task on the VPS):
 
-  latest-tools:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install latest harnesses
-        run: |
-          npm install -g @anthropic-ai/claude-code opencode-ai @openai/codex @github/copilot
-          npm install --prefix "$RUNNER_TEMP/opencode2" @opencode/cli
-      - run: cargo build --release
-      - run: scripts/probe-native-import-latest.sh
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: native-import-latest-report
-          path: artifacts/native-import-latest/**
-```
-
-Daily CI responsibilities:
-
-- Install the latest Claude Code, opencode, Codex, and Copilot CLI versions.
-- Run fixture-backed conversions in isolated source and target stores with unsupported-version override enabled for the probe only.
-- Run fixture imports into isolated target stores.
-- Initialize fresh opencode target databases through the installed opencode CLI before import, then require `opencode export <session-id>` to accept the written session.
-- Probe OpenCode 2 (`@opencode/cli`, installed in its own npm prefix so the 1.x `opencode` stays on PATH) the same way: isolate every `XDG_*` directory, run each command with `--standalone`, initialize the store with `opencode2 session list`, import, then require `opencode2 session export <session-id>` to decode the session and convert it back to Claude.
-- Use `ANTHROPIC_API_KEY` to resume the isolated generated Claude session with one fixed no-tools prompt and require the exact fixed response before promoting Claude target support.
-- Run `copilot --resume=<id>` without Copilot credentials or a terminal and require successful local parsing; do not submit a prompt or require an entitlement.
-- Run Codex app-server `thread/read` for Claude, opencode, and Copilot-origin imports and require at least one projected non-empty turn.
-- Exercise every ordered cross-tool pair, not only Claude-centered round trips.
-- Verify target tool can list/resume or at least parse/read back imported sessions without crashing.
-- Compare detected schemas against the known-version manifest.
-- If sessiongator readback passes but native harness validation has not passed, record the version as `probe-passed`; do not mark it `target-supported`.
-- Promote a version to `target-supported` only after the target harness itself lists, reads, or resumes the generated session without submitting a model prompt.
-- Open a pull request for new probe results that includes:
-  - detected versions
-  - schema fingerprint
-  - fixture result summary
-  - exact manifest entries added by CI
-- If known versions fail, fail hard.
-- Never commit new supported versions directly to `main`; native write compatibility changes must remain reviewable.
+- Write a Claude source session whose only secret is a random code word.
+- Convert it to each tool, resume the converted session with the real client and a real model, and ask for the word.
+- A tool passes when sessiongator reads the session back and the last assistant message holds the word. This checks that the tool loaded the imported history and that sessiongator reads what this tool version wrote.
+- Record passing versions as `verified` and open a pull request.
+- Stores: Claude uses its real store and the session moves to a temp trash afterwards, because a copied login could rotate the real refresh token. Codex uses `FULL_PASS_CODEX_HOME`, which must hold a Codex login. opencode and Copilot use temp stores; the opencode login is imported from `FULL_PASS_OPENCODE_AUTH_DB`.
+- Limit: OpenCode's free models reject resumed imported sessions (`FreeTierError`, HTTP 403), even though OpenCode loads the session; a native session with an appended sessiongator message is accepted. So the opencode check needs a provider login and `FULL_PASS_OPENCODE_MODEL`. Revisit when OpenCode documents what the free tier checks.
 
 ## Implementation Phases
 
-1. Add version detection and schema fingerprinting.
-2. Add sanitized fixture format and fixture test harness.
-3. Add native readers that produce `NativeSession` without dropping known fields.
-4. Add mapping/report generation with dry-run only.
-5. Add opencode writer into isolated DB fixtures.
-6. Add Claude writer into isolated config fixtures.
-7. Add live-store backup/locking and write support.
-8. Add CLI `convert` command.
-9. Add TUI conversion dialog and keybinding.
-10. Add daily latest-tool CI.
+1. ✅ Add version detection and schema fingerprinting.
+2. ✅ Add sanitized fixture format and fixture test harness.
+3. ✅ Add native readers that produce `NativeSession`; see Mapping Rules for fields not read.
+4. ✅ Add mapping/report generation with dry-run.
+5. ✅ Add opencode writer.
+6. ✅ Add Claude writer.
+7. ✅ Add live-store writes: immediate transactions, atomic renames, readback, and `undo` instead of backups.
+8. ✅ Add CLI `convert` command.
+9. ⬜ Add TUI conversion dialog; the `Ctrl+T` keybinding places a dry-run command.
+10. ✅ Add daily latest-tool CI and the full pass.
 
 ## Acceptance Criteria
 
 - `sessiongator convert --dry-run` reports exactly what will map, drop, and synthesize.
 - Supported versions are loaded from a checked-in manifest.
 - Unsupported versions fail closed by default.
-- Fixture tests cover text, reasoning, tool use/result, attachments, compaction, todo, and sidecar cases.
-- Native target readback matches the conversion report for every fixture.
-- Live writes create backups and verify readback before success.
+- Fixture tests cover text, reasoning, and tool use/result; attachments, compaction, todo, and sidecar cases are not covered yet.
+- Every write is read back: title, cwd, and the count of user and assistant text messages must match, else the written session moves to the trash.
+- Live writes verify readback before success; `undo --target` removes a written session.
 - TUI conversion is available without breaking current resume/path/copy behavior.
-- Daily CI records latest-tool round trips and opens a reviewable manifest-update PR; only native-harness validation can promote target support.
+- Daily CI records latest-tool round trips as `probe-passed` in a reviewable pull request; only the full pass records `verified`.
 
 ## Open Questions
 
-- Claude Code does not document JSONL as a stable import API. Before enabling Claude target writes to live stores by default, verify imported fixtures can be resumed with `claude -r <id>` on each supported version.
+- Claude Code does not document JSONL as a stable import API. The full pass resumes an imported session with `claude -p --resume <id>` and a real model for each verified version.
 - opencode may rely on event projection tables beyond direct session/message rows. Confirm whether writing canonical `session_message` plus event rows is required for current and future resume flows. For `2.0.18`: `session_message` plus `event_sequence` is enough for `session export`; no `event` rows are written.
-- Decide whether imported hidden reasoning should be preserved by default, stripped by default, or controlled by `--include-reasoning`.
+- Decided: imported hidden reasoning is preserved by default as the target's reasoning part (Claude `thinking`, opencode `reasoning`). Copilot keeps it only in the hidden `sessiongatorParts` field; Codex gets text only. No `--include-reasoning` flag.
 - Decide whether tool results that include local file paths should copy sidecar files into the target store or reference original paths.

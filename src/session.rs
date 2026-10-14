@@ -20,9 +20,11 @@ use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use crate::keybindings::{BindingContext, BindingTarget, CoreAction, Keymap};
-use crate::model::{now_ms, sort_sessions, Session, SortMode, Tool};
+use crate::model::{sort_sessions, Session, SortMode, Tool};
+use crate::native::Turn;
 use crate::search::{filter_sessions, SearchMode};
-use crate::sources::{sources_from_env, Turn};
+use crate::stores::{read_transcripts, store_for, stores_from_env};
+use crate::time::now_ms;
 use crate::ui::{session_layout, session_list_items, transcript_text, Palette, Theme};
 
 struct SessionBatch {
@@ -36,10 +38,9 @@ struct TranscriptResult {
     turns: Result<Vec<Turn>, String>,
 }
 
-struct ContentEntry {
-    key: String,
-    text: String,
-    done: bool,
+enum ContentEvent {
+    Entry { key: String, text: String },
+    Done,
 }
 
 /// Which panel receives arrow keys, mirroring the navigate implementation:
@@ -51,41 +52,49 @@ enum Focus {
     Transcript,
 }
 
-/// The selection line handed to the shell wrapper.
-fn resume_selection(session: &Session) -> String {
-    format!(
-        "resume\t{}\t{}\t{}",
-        session.tool.name(),
-        session.id,
-        session.cwd
-    )
+/// The selection line handed to the shell wrapper for an exit action;
+/// `None` for actions that do not leave the picker.
+fn selection_line(action: CoreAction, session: &Session) -> Option<String> {
+    let tool = session.tool.name();
+    match action {
+        CoreAction::Resume => Some(format!("resume\t{tool}\t{}\t{}", session.id, session.cwd)),
+        CoreAction::ResumeHere => Some(format!("resume-here\t{tool}\t{}\t", session.id)),
+        CoreAction::ShowPath => Some(format!("path\t{}", session.source_ref)),
+        CoreAction::Convert => Some(format!(
+            "convert\t{tool}\t{}\t{}\t{}",
+            session.tool.default_convert_target().name(),
+            session.id,
+            session.cwd
+        )),
+        _ => None,
+    }
 }
 
-fn resume_here_selection(session: &Session) -> String {
-    format!("resume-here\t{}\t{}\t", session.tool.name(), session.id)
+fn selected_session<'a>(
+    sessions: &'a [Session],
+    filtered: &[usize],
+    selected: usize,
+) -> Option<&'a Session> {
+    filtered
+        .get(selected)
+        .and_then(|index| sessions.get(*index))
 }
 
-fn path_selection(session: &Session) -> String {
-    format!("path\t{}", session.source_ref)
-}
-
-fn convert_selection(session: &Session) -> String {
-    let target = session.tool.default_convert_target();
-    format!(
-        "convert\t{}\t{}\t{}\t{}",
-        session.tool.name(),
-        target.name(),
-        session.id,
-        session.cwd
-    )
+/// Where the session with `key` sits in `filtered` now.
+fn position_of(sessions: &[Session], filtered: &[usize], key: Option<&str>) -> Option<usize> {
+    let key = key?;
+    filtered
+        .iter()
+        .position(|index| sessions[*index].key() == key)
 }
 
 fn spawn_session_load(tx: mpsc::Sender<SessionBatch>) {
     thread::spawn(move || {
-        let sources = sources_from_env();
-        let available: Vec<_> = sources.iter().filter(|s| s.available()).collect();
-        let total = available.len();
-        if total == 0 {
+        let stores: Vec<_> = stores_from_env()
+            .into_iter()
+            .filter(|store| store.available())
+            .collect();
+        if stores.is_empty() {
             let _ = tx.send(SessionBatch {
                 sessions: Vec::new(),
                 error: Some(
@@ -95,12 +104,13 @@ fn spawn_session_load(tx: mpsc::Sender<SessionBatch>) {
             });
             return;
         }
-        for (index, source) in available.iter().enumerate() {
-            let (sessions, error) = match source.list() {
+        let total = stores.len();
+        for (index, store) in stores.iter().enumerate() {
+            let (sessions, error) = match store.list() {
                 Ok(sessions) => (sessions, None),
-                Err(message) => (
+                Err(error) => (
                     Vec::new(),
-                    Some(format!("{}: {message}", source.tool().name())),
+                    Some(format!("{}: {error}", store.tool().name())),
                 ),
             };
             let _ = tx.send(SessionBatch {
@@ -114,50 +124,42 @@ fn spawn_session_load(tx: mpsc::Sender<SessionBatch>) {
 
 fn spawn_transcript_load(tool: Tool, id: String, key: String, tx: mpsc::Sender<TranscriptResult>) {
     thread::spawn(move || {
-        let sources = sources_from_env();
-        let turns = sources
-            .iter()
-            .find(|source| source.tool() == tool)
-            .map(|source| source.transcript(&id))
-            .unwrap_or_else(|| Err("source not found".to_string()));
+        let turns = store_for(tool, None)
+            .transcript(&id)
+            .map_err(|error| error.to_string());
         let _ = tx.send(TranscriptResult { key, turns });
     });
 }
 
 /// Extract lowercased transcript text for every session in the background so
-/// "search all" can match message content. Streams one entry per session.
-fn spawn_content_index(targets: Vec<(Tool, String, String)>, tx: mpsc::Sender<ContentEntry>) {
+/// "search all" can match message content. Streams one entry per session,
+/// then `Done`.
+fn spawn_content_index(targets: Vec<(Tool, String, String)>, tx: mpsc::Sender<ContentEvent>) {
     thread::spawn(move || {
-        let sources = sources_from_env();
-        let total = targets.len();
-        for (index, (tool, id, key)) in targets.into_iter().enumerate() {
-            let text = sources
-                .iter()
-                .find(|source| source.tool() == tool)
-                .and_then(|source| source.transcript(&id).ok())
-                .map(|turns| {
-                    turns
-                        .iter()
-                        .map(|turn| turn.text.to_lowercase())
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_default();
-            let _ = tx.send(ContentEntry {
-                key,
-                text,
-                done: index + 1 == total,
+        let ids: Vec<(Tool, String)> = targets
+            .iter()
+            .map(|(tool, id, _)| (*tool, id.clone()))
+            .collect();
+        read_transcripts(&ids, |index, text| {
+            let _ = tx.send(ContentEvent::Entry {
+                key: targets[index].2.clone(),
+                text: text.unwrap_or_default().to_lowercase(),
             });
-        }
+        });
+        let _ = tx.send(ContentEvent::Done);
     });
 }
 
-pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>> {
+pub fn select_session(
+    theme: Theme,
+    keymap: &Keymap,
+    initial_query: &str,
+) -> AppResult<Option<String>> {
     let palette = Palette::for_theme(theme);
     let project_root = std::env::current_dir().ok().map(current_project_root);
     let (mut terminal, _guard) = setup_terminal()?;
 
-    let mut input = Input::default();
+    let mut input = Input::new(initial_query.to_string());
     let mut sessions: Vec<Session> = Vec::new();
     let mut blobs: Vec<String> = Vec::new();
     let mut filtered: Vec<usize> = Vec::new();
@@ -186,7 +188,7 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
 
     let (session_tx, session_rx) = mpsc::channel::<SessionBatch>();
     let (transcript_tx, transcript_rx) = mpsc::channel::<TranscriptResult>();
-    let (content_tx, content_rx) = mpsc::channel::<ContentEntry>();
+    let (content_tx, content_rx) = mpsc::channel::<ContentEvent>();
     spawn_session_load(session_tx);
 
     loop {
@@ -213,12 +215,13 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
                 }
             }
         }
-        while let Ok(entry) = content_rx.try_recv() {
-            if !entry.text.is_empty() {
-                content.insert(entry.key, entry.text);
-            }
-            if entry.done {
-                indexing_done = true;
+        while let Ok(event) = content_rx.try_recv() {
+            match event {
+                ContentEvent::Entry { key, text } if !text.is_empty() => {
+                    content.insert(key, text);
+                }
+                ContentEvent::Entry { .. } => {}
+                ContentEvent::Done => indexing_done = true,
             }
             if search_mode == SearchMode::All && !input.value().trim().is_empty() {
                 refilter = true;
@@ -236,25 +239,14 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
             }
         }
         if refilter {
-            let previous_key = filtered
-                .get(selected)
-                .and_then(|index| sessions.get(*index))
-                .map(Session::key);
+            let previous_key = selected_session(&sessions, &filtered, selected).map(Session::key);
             filtered = filter_sessions(&sessions, &blobs, input.value(), search_mode, &content);
-            selected = previous_key
-                .and_then(|key| {
-                    filtered
-                        .iter()
-                        .position(|index| sessions[*index].key() == key)
-                })
+            selected = position_of(&sessions, &filtered, previous_key.as_deref())
                 .unwrap_or_else(|| selected.min(filtered.len().saturating_sub(1)));
         }
 
         // Kick off a transcript load for the selected session if needed.
-        if let Some(session) = filtered
-            .get(selected)
-            .and_then(|index| sessions.get(*index))
-        {
+        if let Some(session) = selected_session(&sessions, &filtered, selected) {
             let key = session.key();
             if !transcripts.contains_key(&key)
                 && !transcript_errors.contains_key(&key)
@@ -332,9 +324,7 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
             );
             frame.render_stateful_widget(list, ui.results, &mut state);
 
-            let session = filtered
-                .get(selected)
-                .and_then(|index| sessions.get(*index));
+            let session = selected_session(&sessions, &filtered, selected);
             let key = session.map(Session::key);
             let turns = key.as_ref().and_then(|key| transcripts.get(key));
             let transcript_error = key
@@ -434,46 +424,21 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
                                     terminal.show_cursor()?;
                                     return Ok(None);
                                 }
-                                CoreAction::Resume => {
-                                    if let Some(session) = filtered
-                                        .get(selected)
-                                        .and_then(|index| sessions.get(*index))
+                                CoreAction::Resume
+                                | CoreAction::ResumeHere
+                                | CoreAction::ShowPath
+                                | CoreAction::Convert => {
+                                    if let Some(line) =
+                                        selected_session(&sessions, &filtered, selected)
+                                            .and_then(|session| selection_line(action, session))
                                     {
                                         terminal.show_cursor()?;
-                                        return Ok(Some(resume_selection(session)));
-                                    }
-                                }
-                                CoreAction::ResumeHere => {
-                                    if let Some(session) = filtered
-                                        .get(selected)
-                                        .and_then(|index| sessions.get(*index))
-                                    {
-                                        terminal.show_cursor()?;
-                                        return Ok(Some(resume_here_selection(session)));
-                                    }
-                                }
-                                CoreAction::ShowPath => {
-                                    if let Some(session) = filtered
-                                        .get(selected)
-                                        .and_then(|index| sessions.get(*index))
-                                    {
-                                        terminal.show_cursor()?;
-                                        return Ok(Some(path_selection(session)));
-                                    }
-                                }
-                                CoreAction::Convert => {
-                                    if let Some(session) = filtered
-                                        .get(selected)
-                                        .and_then(|index| sessions.get(*index))
-                                    {
-                                        terminal.show_cursor()?;
-                                        return Ok(Some(convert_selection(session)));
+                                        return Ok(Some(line));
                                     }
                                 }
                                 CoreAction::CopyId => {
-                                    if let Some(session) = filtered
-                                        .get(selected)
-                                        .and_then(|index| sessions.get(*index))
+                                    if let Some(session) =
+                                        selected_session(&sessions, &filtered, selected)
                                     {
                                         let _ = copy_to_clipboard(&session.id);
                                     }
@@ -484,10 +449,9 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
                                 }
                                 CoreAction::CycleSort => {
                                     sort_mode = sort_mode.next();
-                                    let previous_key = filtered
-                                        .get(selected)
-                                        .and_then(|index| sessions.get(*index))
-                                        .map(Session::key);
+                                    let previous_key =
+                                        selected_session(&sessions, &filtered, selected)
+                                            .map(Session::key);
                                     sort_sessions(&mut sessions, sort_mode);
                                     project_session_count = promote_project_sessions(
                                         &mut sessions,
@@ -502,13 +466,9 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
                                         search_mode,
                                         &content,
                                     );
-                                    selected = previous_key
-                                        .and_then(|key| {
-                                            filtered
-                                                .iter()
-                                                .position(|index| sessions[*index].key() == key)
-                                        })
-                                        .unwrap_or(0);
+                                    selected =
+                                        position_of(&sessions, &filtered, previous_key.as_deref())
+                                            .unwrap_or(0);
                                     list_offset = 0;
                                 }
                                 CoreAction::MoveUp => match focus {
@@ -627,20 +587,13 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
                 }
             }
             if needs_refilter {
-                let previous_key = filtered
-                    .get(selected)
-                    .and_then(|index| sessions.get(*index))
-                    .map(Session::key);
+                let previous_key =
+                    selected_session(&sessions, &filtered, selected).map(Session::key);
                 filtered = filter_sessions(&sessions, &blobs, input.value(), search_mode, &content);
                 selected = if reset_selection {
                     0
                 } else {
-                    previous_key
-                        .and_then(|key| {
-                            filtered
-                                .iter()
-                                .position(|index| sessions[*index].key() == key)
-                        })
+                    position_of(&sessions, &filtered, previous_key.as_deref())
                         .unwrap_or_else(|| selected.min(filtered.len().saturating_sub(1)))
                 };
                 list_offset = 0;
@@ -650,7 +603,7 @@ pub fn select_session(theme: Theme, keymap: &Keymap) -> AppResult<Option<String>
     }
 }
 
-fn current_project_root(current_dir: PathBuf) -> PathBuf {
+pub fn current_project_root(current_dir: PathBuf) -> PathBuf {
     current_dir
         .ancestors()
         .find(|path| path.join(".git").exists())
@@ -747,40 +700,40 @@ mod tests {
         }
     }
 
+    /// The tab-separated contract `scripts/sessiongator.zsh` parses.
     #[test]
     fn selection_lines() {
+        let line = |action, session: &Session| selection_line(action, session).unwrap();
         let claude = session(Tool::Claude, "abc-123", "/Users/me/proj");
         assert_eq!(
-            resume_selection(&claude),
+            line(CoreAction::Resume, &claude),
             "resume\tclaude\tabc-123\t/Users/me/proj"
         );
         assert_eq!(
-            resume_here_selection(&claude),
+            line(CoreAction::ResumeHere, &claude),
             "resume-here\tclaude\tabc-123\t"
         );
-        let opencode = session(Tool::Opencode, "ses_1", "/w");
-        assert_eq!(resume_selection(&opencode), "resume\topencode\tses_1\t/w");
-        assert_eq!(path_selection(&claude), "path\t/store/ref");
+        assert_eq!(line(CoreAction::ShowPath, &claude), "path\t/store/ref");
         assert_eq!(
-            convert_selection(&claude),
+            line(CoreAction::Convert, &claude),
             "convert\tclaude\topencode\tabc-123\t/Users/me/proj"
         );
-        assert_eq!(
-            convert_selection(&opencode),
-            "convert\topencode\tclaude\tses_1\t/w"
-        );
-        let codex = session(Tool::Codex, "codex_1", "/c");
-        assert_eq!(resume_selection(&codex), "resume\tcodex\tcodex_1\t/c");
-        assert_eq!(
-            convert_selection(&codex),
-            "convert\tcodex\tclaude\tcodex_1\t/c"
-        );
-        let copilot = session(Tool::Copilot, "copilot_1", "/p");
-        assert_eq!(resume_selection(&copilot), "resume\tcopilot\tcopilot_1\t/p");
-        assert_eq!(
-            convert_selection(&copilot),
-            "convert\tcopilot\tclaude\tcopilot_1\t/p"
-        );
+        for (tool, id) in [
+            (Tool::Opencode, "ses_1"),
+            (Tool::Codex, "c_1"),
+            (Tool::Copilot, "p_1"),
+        ] {
+            let other = session(tool, id, "/w");
+            assert_eq!(
+                line(CoreAction::Resume, &other),
+                format!("resume\t{}\t{id}\t/w", tool.name())
+            );
+            assert_eq!(
+                line(CoreAction::Convert, &other),
+                format!("convert\t{}\tclaude\t{id}\t/w", tool.name())
+            );
+        }
+        assert_eq!(selection_line(CoreAction::CopyId, &claude), None);
     }
 
     #[test]

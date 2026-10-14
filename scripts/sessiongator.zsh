@@ -66,6 +66,7 @@ ai-sessions() {
         fi
         [[ -n "$dir" && -d "$dir" ]] && { cd -- "$dir" || return $?; }
       fi
+      # Keep in sync with Tool::resume_command in src/model.rs.
       case "$tool" in
         claude) BUFFER="claude --resume ${(q)id}" ;;
         opencode) BUFFER="opencode --session ${(q)id}" ;;

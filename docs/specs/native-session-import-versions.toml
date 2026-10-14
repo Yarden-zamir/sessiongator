@@ -1,391 +1,236 @@
-# Version/fixture manifest for the native session import spec.
-# This is intentionally checked in so implementation and CI can use the same
-# source of truth for supported versions and required fixtures.
+# Native session import compatibility manifest. sessiongator compiles this
+# file in; rebuild after you change it.
+#
+# Statuses (docs/specs/native-session-import.md, "Version Policy"):
+#   verified       A full pass on a machine with real clients and model keys:
+#                  the target tool resumed an imported session and answered
+#                  from its history. Written by scripts/full-pass-native-import.sh.
+#   probe-passed   A CI round trip without model calls. Written by the daily
+#                  native import compatibility workflow.
+#   read-observed  Sessions from this version range were read. Source only.
+# Versions between two verified versions of one major version are "bracketed"
+# and count as verified. sessiongator derives that; never write it here.
 
-[metadata]
-spec = "docs/specs/native-session-import.md"
-researched_at = "2026-07-03"
+[[tools]]
+tool = "opencode"
+version_range = "1.1.17..=1.18.34"
+status = "read-observed"
+source = "local-migrated-db-and-ci"
+notes = "OpenCode 1.x. sessiongator reads 1.x sessions and writes OpenCode 2 only."
 
 [[tools]]
 tool = "claude"
 version = "2.1.199"
-status = "target-supported"
+status = "probe-passed"
 source = "local-sampling-and-docs"
-store = "jsonl-projects"
-fixture_root = "fixtures/native-import/claude/2.1.199"
-required_fixtures = [
-  "basic-text",
-  "tool-use",
-  "attachments",
-  "reasoning",
-  "subagent-sidecar",
-]
 notes = "Claude JSONL is not documented as a stable import API; live target writes require resume verification with claude -r."
 
 [[tools]]
 tool = "claude"
 version = "2.1.203"
-status = "target-supported"
+status = "probe-passed"
 source = "local-sampling-and-dry-run-write"
-store = "jsonl-projects"
-fixture_root = "fixtures/native-import/claude/2.1.199"
 notes = "Local dry-run and isolated target-store write succeeded against the same projects JSONL layout as 2.1.199."
-
-[[tools]]
-tool = "opencode"
-version = "1.17.13"
-status = "target-supported"
-source = "local-sampling-and-upstream-schema"
-store = "sqlite"
-fixture_root = "fixtures/native-import/opencode/1.17.13"
-schema_tables = [
-  "project",
-  "project_directory",
-  "session",
-  "message",
-  "part",
-  "session_message",
-  "session_input",
-  "session_context_epoch",
-  "todo",
-  "event",
-  "event_sequence",
-]
-required_fixtures = [
-  "basic-text",
-  "tool-use",
-  "attachments",
-  "reasoning",
-  "compaction",
-  "todo",
-]
-notes = "Prefer current session_message schema; compatibility projections may be needed for message/part readers."
-
-[[tools]]
-tool = "opencode"
-version_range = "1.17.9..=1.17.13"
-status = "read-observed"
-source = "local-migrated-db"
-store = "sqlite"
-notes = "Rows from these versions were observed in a migrated 1.17.13 DB. Write support needs per-version fixtures."
-
-[[tools]]
-tool = "opencode"
-version_range = "1.14.22..=1.14.48"
-status = "read-observed"
-source = "local-migrated-db"
-store = "sqlite"
-notes = "Historical sessions observed after migration; do not write new sessions using these versions."
-
-[[tools]]
-tool = "opencode"
-version_range = "1.1.17..=1.2.27"
-status = "read-observed"
-source = "local-migrated-db"
-store = "sqlite"
-notes = "Historical sessions observed after migration; do not write new sessions using these versions."
 
 [[tools]]
 tool = "claude"
 version = "2.1.204"
-status = "target-supported"
+status = "probe-passed"
 source = "ci-latest-tools"
-store = "jsonl-projects"
-fixture_root = "fixtures/native-import/claude/2.1.199"
 notes = "CI latest-tool probe passed dry-run and isolated target-store writes against the same projects JSONL layout as 2.1.199."
-
-[[tools]]
-tool = "opencode"
-version = "1.17.15"
-status = "target-supported"
-source = "ci-latest-tools"
-store = "sqlite"
-fixture_root = "fixtures/native-import/opencode/1.17.13"
-notes = "CI latest-tool probe passed dry-run and isolated target-store writes against the current SQLite import layout."
-
-[[tools]]
-tool = "codex"
-version = "0.142.5"
-status = "target-supported"
-source = "local-sampling-and-basic-roundtrip"
-store = "rollout-jsonl"
-fixture_root = "fixtures/native-import/codex/0.142.5"
-notes = "Basic text/session metadata round-trip is supported through sessiongator-written Codex rollout JSONL and session_index.jsonl."
-
-[[tools]]
-tool = "copilot"
-version = "1.0.68"
-status = "target-supported"
-source = "local-sampling-and-basic-roundtrip"
-store = "session-store-sqlite-plus-session-state"
-fixture_root = "fixtures/native-import/copilot/1.0.68"
-notes = "Basic text/session metadata round-trip is supported through sessiongator-written session-state events and session-store.db projections."
 
 [[tools]]
 tool = "claude"
 version = "2.1.205"
-status = "target-supported"
+status = "probe-passed"
 source = "local-sampling-and-matrix-roundtrip"
-store = "jsonl-projects"
-fixture_root = "fixtures/native-import/claude/2.1.199"
 notes = "Four-tool matrix probe passed dry-run and isolated target-store writes against the same projects JSONL layout as 2.1.199."
-
-[[tools]]
-tool = "opencode"
-version = "1.17.16"
-status = "target-supported"
-source = "local-sampling-and-matrix-roundtrip"
-store = "sqlite"
-fixture_root = "fixtures/native-import/opencode/1.17.13"
-notes = "Four-tool matrix probe passed dry-run and isolated target-store writes against the current SQLite import layout."
-
-[[tools]]
-tool = "codex"
-version = "0.143.0"
-status = "target-supported"
-source = "local-sampling-and-matrix-roundtrip"
-store = "rollout-jsonl"
-fixture_root = "fixtures/native-import/codex/0.142.5"
-notes = "Four-tool matrix probe passed basic text/session metadata writes through Codex rollout JSONL and session_index.jsonl."
-
-[[tools]]
-tool = "copilot"
-version = "1.0.69"
-status = "target-supported"
-source = "local-sampling-and-matrix-roundtrip"
-store = "session-store-sqlite-plus-session-state"
-fixture_root = "fixtures/native-import/copilot/1.0.68"
-notes = "Four-tool matrix probe passed basic text/session metadata writes through session-state events and session-store.db projections."
 
 [[tools]]
 tool = "claude"
 version = "2.1.207"
-status = "target-supported"
+status = "probe-passed"
 source = "local-sampling-and-full-native-parser-roundtrip"
-store = "jsonl-projects"
-fixture_root = "fixtures/native-import/claude/2.1.199"
 notes = "Full native parser probe passed dry-run and isolated target-store writes against the same projects JSONL layout as 2.1.199."
-
-[[tools]]
-tool = "opencode"
-version = "1.17.17"
-status = "target-supported"
-source = "local-sampling-and-full-native-parser-roundtrip"
-store = "sqlite"
-fixture_root = "fixtures/native-import/opencode/1.17.13"
-notes = "Full native parser probe passed dry-run and isolated target-store writes against the current SQLite import layout."
 
 [[tools]]
 tool = "claude"
 version = "2.1.228"
 status = "probe-passed"
 source = "ci-sessiongator-roundtrip"
-store = "jsonl-projects"
-fixture_root = "fixtures/native-import/claude/2.1.199"
 notes = "CI latest-tool probe passed dry-run and isolated target-store writes against the same projects JSONL layout as 2.1.199."
-
-[[tools]]
-tool = "opencode"
-version = "1.18.16"
-status = "target-supported"
-source = "ci-native-harness-export"
-store = "sqlite"
-fixture_root = "fixtures/native-import/opencode/1.17.13"
-notes = "CI initialized the isolated SQLite store through opencode, then opencode exported the sessiongator-written session successfully. Fresh target databases must be initialized by opencode before import."
-
-[[tools]]
-tool = "codex"
-version = "0.147.0"
-status = "target-supported"
-source = "manual-native-harness-matrix"
-store = "rollout-jsonl"
-fixture_root = "fixtures/native-import/codex/0.142.5"
-notes = "Codex app-server thread/read projected non-empty turns from Claude, opencode, and Copilot-origin imports after native envelope validation."
-
-[[tools]]
-tool = "copilot"
-version = "1.0.79"
-status = "target-supported"
-source = "ci-native-harness-resume"
-store = "session-store-sqlite-plus-session-state"
-fixture_root = "fixtures/native-import/copilot/1.0.68"
-notes = "copilot --resume discovered and parsed the isolated session without authentication or a model request; model continuation remains unverified."
 
 [[tools]]
 tool = "claude"
 version = "2.1.229"
-status = "target-supported"
+status = "probe-passed"
 source = "ci-native-harness-resume"
-store = "jsonl-projects"
-fixture_root = "fixtures/native-import/claude/2.1.199"
 notes = "CI resumed the isolated generated session through Claude Code and received the exact no-tools probe response."
-
-[[tools]]
-tool = "opencode"
-version = "1.18.18"
-status = "target-supported"
-source = "ci-native-harness-export"
-store = "sqlite"
-fixture_root = "fixtures/native-import/opencode/1.17.13"
-notes = "CI initialized the isolated SQLite store through opencode, then opencode exported the sessiongator-written session successfully."
 
 [[tools]]
 tool = "claude"
 version = "2.1.250"
-status = "target-supported"
+status = "probe-passed"
 source = "ci-native-harness-resume"
-store = "jsonl-projects"
-fixture_root = "fixtures/native-import/claude/2.1.199"
 notes = "CI resumed the isolated generated session through Claude Code and received the exact no-tools probe response."
-
-[[tools]]
-tool = "opencode"
-version = "1.18.25"
-status = "target-supported"
-source = "ci-native-harness-export"
-store = "sqlite"
-fixture_root = "fixtures/native-import/opencode/1.17.13"
-notes = "CI initialized the isolated SQLite store through opencode, then opencode exported the sessiongator-written session successfully."
-
-[[tools]]
-tool = "codex"
-version = "0.150.1"
-status = "target-supported"
-source = "ci-native-harness-read"
-store = "rollout-jsonl"
-fixture_root = "fixtures/native-import/codex/0.142.5"
-notes = "Codex app-server thread/read projected non-empty turns from Claude, opencode, and Copilot-origin imports."
-
-[[tools]]
-tool = "copilot"
-version = "1.0.81"
-status = "target-supported"
-source = "ci-native-harness-resume"
-store = "session-store-sqlite-plus-session-state"
-fixture_root = "fixtures/native-import/copilot/1.0.68"
-notes = "CI confirmed copilot --resume discovers and parses the isolated session without authentication or a model request."
 
 [[tools]]
 tool = "claude"
 version = "2.1.258"
-status = "target-supported"
+status = "probe-passed"
 source = "ci-native-harness-resume"
-store = "jsonl-projects"
-fixture_root = "fixtures/native-import/claude/2.1.199"
 notes = "CI resumed the isolated generated session through Claude Code and received the exact no-tools probe response."
-
-[[tools]]
-tool = "opencode"
-version = "1.18.26"
-status = "target-supported"
-source = "ci-native-harness-export"
-store = "sqlite"
-fixture_root = "fixtures/native-import/opencode/1.17.13"
-notes = "CI initialized the isolated SQLite store through opencode, then opencode exported the sessiongator-written session successfully."
-
-[[tools]]
-tool = "codex"
-version = "0.152.1"
-status = "target-supported"
-source = "ci-native-harness-read"
-store = "rollout-jsonl"
-fixture_root = "fixtures/native-import/codex/0.142.5"
-notes = "Codex app-server thread/read projected non-empty turns from Claude, opencode, and Copilot-origin imports."
-
-[[tools]]
-tool = "copilot"
-version = "1.0.82"
-status = "target-supported"
-source = "ci-native-harness-resume"
-store = "session-store-sqlite-plus-session-state"
-fixture_root = "fixtures/native-import/copilot/1.0.68"
-notes = "CI confirmed copilot --resume discovers and parses the isolated session without authentication or a model request."
-
-[[tools]]
-tool = "opencode"
-version = "2.0.18"
-status = "target-supported"
-source = "local-v2-binary-export"
-store = "sqlite-session-v2"
-notes = "Isolated fresh 2.0.18 database: a Claude fixture import with tool calls wrote session_v2, session_message and event_sequence, and opencode session export --standalone decoded every message. Prompting an imported session was not tested (needs a model login)."
 
 [[tools]]
 tool = "claude"
 version = "2.1.283"
-status = "target-supported"
+status = "probe-passed"
 source = "ci-native-harness-resume"
-store = "jsonl-projects"
-fixture_root = "fixtures/native-import/claude/2.1.199"
 notes = "CI resumed the isolated generated session through Claude Code and received the exact no-tools probe response."
 
 [[tools]]
 tool = "opencode"
-version = "1.18.33"
-status = "target-supported"
-source = "ci-native-harness-export"
-store = "sqlite"
-fixture_root = "fixtures/native-import/opencode/1.17.13"
-notes = "CI initialized the isolated SQLite store through opencode, then opencode exported the sessiongator-written session successfully."
+version = "2.0.18"
+status = "probe-passed"
+source = "local-v2-binary-export"
+notes = "Isolated fresh 2.0.18 database: a Claude fixture import with tool calls wrote session_v2, session_message and event_sequence, and opencode session export --standalone decoded every message. Prompting an imported session was not tested (needs a model login)."
+
+[[tools]]
+tool = "codex"
+version = "0.142.5"
+status = "probe-passed"
+source = "local-sampling-and-basic-roundtrip"
+notes = "Basic text/session metadata round-trip is supported through sessiongator-written Codex rollout JSONL and session_index.jsonl."
+
+[[tools]]
+tool = "codex"
+version = "0.143.0"
+status = "probe-passed"
+source = "local-sampling-and-matrix-roundtrip"
+notes = "Four-tool matrix probe passed basic text/session metadata writes through Codex rollout JSONL and session_index.jsonl."
+
+[[tools]]
+tool = "codex"
+version = "0.147.0"
+status = "probe-passed"
+source = "manual-native-harness-matrix"
+notes = "Codex app-server thread/read projected non-empty turns from Claude, opencode, and Copilot-origin imports after native envelope validation."
+
+[[tools]]
+tool = "codex"
+version = "0.150.1"
+status = "probe-passed"
+source = "ci-native-harness-read"
+notes = "Codex app-server thread/read projected non-empty turns from Claude, opencode, and Copilot-origin imports."
+
+[[tools]]
+tool = "codex"
+version = "0.152.1"
+status = "probe-passed"
+source = "ci-native-harness-read"
+notes = "Codex app-server thread/read projected non-empty turns from Claude, opencode, and Copilot-origin imports."
 
 [[tools]]
 tool = "codex"
 version = "0.158.0"
-status = "target-supported"
+status = "probe-passed"
 source = "ci-native-harness-read"
-store = "rollout-jsonl"
-fixture_root = "fixtures/native-import/codex/0.142.5"
 notes = "Codex app-server thread/read projected non-empty turns from Claude, opencode, and Copilot-origin imports."
+
+[[tools]]
+tool = "copilot"
+version = "1.0.68"
+status = "probe-passed"
+source = "local-sampling-and-basic-roundtrip"
+notes = "Basic text/session metadata round-trip is supported through sessiongator-written session-state events and session-store.db projections."
+
+[[tools]]
+tool = "copilot"
+version = "1.0.69"
+status = "probe-passed"
+source = "local-sampling-and-matrix-roundtrip"
+notes = "Four-tool matrix probe passed basic text/session metadata writes through session-state events and session-store.db projections."
+
+[[tools]]
+tool = "copilot"
+version = "1.0.79"
+status = "probe-passed"
+source = "ci-native-harness-resume"
+notes = "copilot --resume discovered and parsed the isolated session without authentication or a model request; model continuation remains unverified."
+
+[[tools]]
+tool = "copilot"
+version = "1.0.81"
+status = "probe-passed"
+source = "ci-native-harness-resume"
+notes = "CI confirmed copilot --resume discovers and parses the isolated session without authentication or a model request."
+
+[[tools]]
+tool = "copilot"
+version = "1.0.82"
+status = "probe-passed"
+source = "ci-native-harness-resume"
+notes = "CI confirmed copilot --resume discovers and parses the isolated session without authentication or a model request."
 
 [[tools]]
 tool = "copilot"
 version = "1.0.88"
-status = "target-supported"
+status = "probe-passed"
 source = "ci-native-harness-resume"
-store = "session-store-sqlite-plus-session-state"
-fixture_root = "fixtures/native-import/copilot/1.0.68"
 notes = "CI confirmed copilot --resume discovers and parses the isolated session without authentication or a model request."
 
 [[tools]]
 tool = "claude"
-version = "2.1.289"
-status = "target-supported"
-source = "ci-native-harness-resume"
-store = "jsonl-projects"
-fixture_root = "fixtures/native-import/claude/2.1.199"
-notes = "CI resumed the isolated generated session through Claude Code and received the exact no-tools probe response."
+version = "2.1.299"
+status = "verified"
+source = "full-pass-yarden-zamir-vps-2"
+notes = "Full pass: the tool resumed an imported session with a real model and answered from its history; sessiongator read the reply back."
+
+[[tools]]
+tool = "copilot"
+version = "1.0.97"
+status = "verified"
+source = "full-pass-yarden-zamir-vps-2"
+notes = "Full pass: the tool resumed an imported session with a real model and answered from its history; sessiongator read the reply back."
 
 [[tools]]
 tool = "opencode"
-version = "1.18.34"
-status = "target-supported"
-source = "ci-native-harness-export"
-store = "sqlite"
-fixture_root = "fixtures/native-import/opencode/1.17.13"
-notes = "CI initialized the isolated SQLite store through opencode, then opencode exported the sessiongator-written session successfully."
+version = "2.0.29"
+status = "probe-passed"
+source = "probe-yarden-zamir-vps-2"
+notes = "Every tool pair converted in isolated stores; the tool exported, read, or parsed each written session without model calls."
+
+[[tools]]
+tool = "codex"
+version = "0.162.1"
+status = "probe-passed"
+source = "probe-yarden-zamir-vps-2"
+notes = "Every tool pair converted in isolated stores; the tool exported, read, or parsed each written session without model calls."
+
+[[tools]]
+tool = "claude"
+version = "2.1.289"
+status = "probe-passed"
+source = "ci-native-harness"
+notes = "CI probe on main before the probe-passed status existed; the tool read, exported, or parsed the sessiongator-written session."
 
 [[tools]]
 tool = "opencode"
 version = "2.0.23"
-status = "target-supported"
-source = "ci-native-harness-export"
-store = "sqlite-session-v2"
-fixture_root = "fixtures/native-import/claude/2.1.199"
-notes = "CI initialized an isolated OpenCode 2 store with --standalone, then opencode session export decoded every sessiongator-written message."
+status = "probe-passed"
+source = "ci-native-harness"
+notes = "CI probe on main before the probe-passed status existed; the tool read, exported, or parsed the sessiongator-written session."
 
 [[tools]]
 tool = "codex"
 version = "0.160.0"
-status = "target-supported"
-source = "ci-native-harness-read"
-store = "rollout-jsonl"
-fixture_root = "fixtures/native-import/codex/0.142.5"
-notes = "Codex app-server thread/read projected non-empty turns from Claude, opencode, and Copilot-origin imports."
+status = "probe-passed"
+source = "ci-native-harness"
+notes = "CI probe on main before the probe-passed status existed; the tool read, exported, or parsed the sessiongator-written session."
 
 [[tools]]
 tool = "copilot"
 version = "1.0.91"
-status = "target-supported"
-source = "ci-native-harness-resume"
-store = "session-store-sqlite-plus-session-state"
-fixture_root = "fixtures/native-import/copilot/1.0.68"
-notes = "CI confirmed copilot --resume discovers and parses the isolated session without authentication or a model request."
+status = "probe-passed"
+source = "ci-native-harness"
+notes = "CI probe on main before the probe-passed status existed; the tool read, exported, or parsed the sessiongator-written session."

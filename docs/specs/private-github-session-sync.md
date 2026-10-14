@@ -108,7 +108,7 @@ sessiongator sync resolve <conflict-id> --fork
 
 ## Architecture Constraints
 
-- `SessionSource` summaries and transcripts are insufficient for sync fidelity. Sync requires lossless, tool-specific export and append operations alongside the richer native import model.
+- `Store::list` summaries and text transcripts are insufficient for sync fidelity. Sync requires lossless, tool-specific export and append operations alongside the richer native import model.
 - Native records are the backup source of truth; canonical events exist for comparison and rendering.
 - Restore and append support must remain gated by `docs/specs/native-session-import-versions.toml`.
 - A source adapter must prove isolated export, restore, suffix append, idempotency, and readback before that tool is marked sync-supported.
