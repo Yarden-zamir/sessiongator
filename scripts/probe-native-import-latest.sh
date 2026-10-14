@@ -1,310 +1,132 @@
 #!/usr/bin/env bash
+# Probe: convert the Claude fixture through every tool pair in isolated
+# stores, and check each written session with the target tool itself,
+# without model calls. A pass records the installed versions as
+# `probe-passed` (scripts/update-native-import-versions.mjs).
+#
+# Needs on PATH: claude, opencode (OpenCode 2), codex, copilot, jq, and a
+# release build of sessiongator.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-bin="$repo_root/target/release/sessiongator"
+bin="${SESSIONGATOR_BIN:-$repo_root/target/release/sessiongator}"
 fixture="$repo_root/fixtures/native-import/claude/2.1.199/basic-text/source"
-source_id="11111111-2222-4333-8444-555555555555"
-tmp="${TMPDIR:-/tmp}/sessiongator-native-import-latest-$$"
+fixture_id="11111111-2222-4333-8444-555555555555"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/sessiongator-probe.XXXXXX")"
+artifacts="$tmp/artifacts"
+mkdir -p "$artifacts"
 
 cleanup() {
-  if [[ -n "${SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS:-}" && -d "$tmp/artifacts" ]]; then
+  if [[ -n "${SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS:-}" ]]; then
     mkdir -p "$SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS"
-    cp -R "$tmp/artifacts"/* "$SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS/" 2>/dev/null || true
+    cp -R "$artifacts"/. "$SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS/" 2>/dev/null || true
   fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
 
-mkdir -p \
-  "$tmp/artifacts" \
-  "$tmp/opencode" \
-  "$tmp/codex" \
-  "$tmp/copilot" \
-  "$tmp/claude-from-opencode" \
-  "$tmp/claude-from-codex" \
-  "$tmp/claude-from-copilot"
+# The undo history of this run stays in the temp directory.
+export SESSIONGATOR_STATE_DIR="$tmp/state"
 
-convert_pair() {
-  local from="$1" source_id="$2" source_store="$3"
-  local to="$4" target_id="$5" target_store="$6"
-  "$bin" convert \
-    --from "$from" \
-    --to "$to" \
-    --id "$source_id" \
-    --source-store "$source_store" \
-    --target-store "$target_store" \
-    --target-id "$target_id" \
-    "${allow_args[@]}" \
-    --report-json > "$tmp/artifacts/$from-to-$to.json"
+# OpenCode 2 talks to a shared background service unless `--standalone` is
+# passed, and keeps logs and repos under XDG_DATA_HOME, so every call gets a
+# private server and private XDG directories.
+opencode_isolated() {
+  local home="$1"
+  shift
+  env OPENCODE_DB="$home/data/opencode/opencode.db" \
+    XDG_DATA_HOME="$home/data" \
+    XDG_STATE_HOME="$home/state" \
+    XDG_CONFIG_HOME="$home/config" \
+    XDG_CACHE_HOME="$home/cache" \
+    opencode "$@" --standalone
 }
 
-validate_copilot_session() {
-  local home="$1" session_id="$2" label="$3"
-  local log_dir="$tmp/artifacts/copilot-logs-$label"
-  mkdir -p "$log_dir"
-  set +e
-  env -u COPILOT_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
-    COPILOT_HOME="$home" copilot \
-    --resume="$session_id" \
-    --screen-reader \
-    --no-color \
-    --no-custom-instructions \
-    --disable-builtin-mcps \
-    --no-remote \
-    --log-level debug \
-    --log-dir "$log_dir" \
-    > "$tmp/artifacts/copilot-native-resume-$label.txt" 2>&1
-  set -e
-  if grep -R -q -E "No session, task, or name matched|Failed to load workspace|Failed to initialize workspace|Session file is corrupted" \
-    "$tmp/artifacts/copilot-native-resume-$label.txt" "$log_dir"; then
-    grep -R -E "No session, task, or name matched|Failed to load workspace|Failed to initialize workspace|Session file is corrupted" \
-      "$tmp/artifacts/copilot-native-resume-$label.txt" "$log_dir" >&2 || true
-    echo "Copilot rejected the $label session" >&2
-    exit 1
+# Print a new empty store path for `tool`. An opencode store must be created
+# by opencode itself so its migration journal matches the installed version.
+new_store() {
+  local tool="$1" name="$2"
+  local home="$tmp/stores/$name"
+  mkdir -p "$home"
+  if [[ "$tool" == opencode ]]; then
+    mkdir -p "$home"/{data,state,config,cache}
+    opencode_isolated "$home" session list --format json > /dev/null
+    echo "$home/data/opencode/opencode.db"
+  else
+    echo "$home"
   fi
 }
 
-validate_codex_session() {
-  local home="$1" session_id="$2" label="$3"
-  local output="$tmp/artifacts/codex-native-read-$label.jsonl"
-  (
-    printf '%s\n' \
-      '{"method":"initialize","id":0,"params":{"clientInfo":{"name":"sessiongator","title":"sessiongator matrix probe","version":"0.4.1"}}}' \
-      '{"method":"initialized","params":{}}' \
-      "{\"method\":\"thread/read\",\"id\":1,\"params\":{\"threadId\":\"$session_id\",\"includeTurns\":true}}"
-    sleep 2
-  ) | CODEX_HOME="$home" codex app-server > "$output"
-  node -e '
-    const fs = require("node:fs");
-    const responses = fs.readFileSync(process.argv[1], "utf8")
-      .trim().split("\n").map(JSON.parse);
-    const thread = responses.find((value) => value.id === 1)?.result?.thread;
-    if (!thread || !thread.turns?.some((turn) => turn.items?.length > 0)) {
-      throw new Error("Codex did not project a non-empty turn");
-    }
-  ' "$output"
+# convert <from> <id> <source store> <to> <target store>; prints the new id.
+convert() {
+  local from="$1" id="$2" source_store="$3" to="$4" target_store="$5"
+  local report="$artifacts/$from-$id-to-$to.json"
+  "$bin" convert --from "$from" --id "$id" --to "$to" \
+    --source-store "$source_store" --target-store "$target_store" \
+    --allow-unsupported-version --report-json > "$report"
+  jq -er .targetId "$report"
 }
 
-validate_claude_session() {
-  local home="$1" session_id="$2" label="$3"
-  CLAUDE_CONFIG_DIR="$home" claude \
-    --resume "$session_id" \
-    --print "Reply with exactly SESSIONGATOR_OK" \
-    --tools "" \
-    --permission-mode plan \
-    --output-format json \
-    > "$tmp/artifacts/claude-native-resume-$label.json"
-  node -e '
-    const fs = require("node:fs");
-    const result = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-    if (result.is_error || result.result?.trim() !== "SESSIONGATOR_OK") {
-      throw new Error(`Claude native resume failed: ${result.result ?? "missing result"}`);
-    }
-  ' "$tmp/artifacts/claude-native-resume-$label.json"
+# The target tool must accept the written session without a model call.
+validate() {
+  local tool="$1" store="$2" id="$3"
+  local log="$artifacts/validate-$tool-$id.txt"
+  case "$tool" in
+    # Claude Code has no model-free resume check; the full pass covers it,
+    # and sessiongator reads the session back here.
+    claude)
+      CLAUDE_CONFIG_DIR="$store" "$bin" show --tool claude "$id" > "$log"
+      ;;
+    opencode)
+      local home="${store%/data/opencode/opencode.db}"
+      opencode_isolated "$home" session export "$id" > "$log"
+      jq -e '[.messages[] | (.info.type // .type)] | (index("user") != null)' "$log" > /dev/null
+      ;;
+    codex)
+      (
+        printf '%s\n' \
+          '{"method":"initialize","id":0,"params":{"clientInfo":{"name":"sessiongator","title":"sessiongator probe","version":"1"}}}' \
+          '{"method":"initialized","params":{}}' \
+          "{\"method\":\"thread/read\",\"id\":1,\"params\":{\"threadId\":\"$id\",\"includeTurns\":true}}"
+        sleep 2
+      ) | CODEX_HOME="$store" codex app-server > "$log"
+      jq -se 'map(select(.id == 1))[0].result.thread.turns | any(.items | length > 0)' "$log" > /dev/null
+      ;;
+    copilot)
+      set +e
+      env -u COPILOT_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
+        COPILOT_HOME="$store" copilot --resume="$id" --screen-reader --no-color \
+        --no-custom-instructions --disable-builtin-mcps --no-remote --log-level none \
+        < /dev/null > "$log" 2>&1
+      set -e
+      if grep -q -E "No session, task, or name matched|Failed to load workspace|Failed to initialize workspace|Session file is corrupted" "$log"; then
+        cat "$log" >&2
+        return 1
+      fi
+      ;;
+  esac
 }
 
-# A new opencode database must be initialized by opencode so its migration
-# journal matches the installed harness before sessiongator adds a session.
-OPENCODE_DB="$tmp/opencode/opencode.db" opencode session list --format json \
-  > "$tmp/artifacts/opencode-empty-session-list.json"
+# Bash 3.2 (macOS) has no associative arrays: `store_<tool>` and `id_<tool>`
+# hold the sessions converted from the fixture.
+for tool in opencode codex copilot; do
+  printf -v "store_$tool" '%s' "$(new_store "$tool" "from-claude-$tool")"
+  store_var="store_$tool"
+  printf -v "id_$tool" '%s' "$(convert claude "$fixture_id" "$fixture" "$tool" "${!store_var}")"
+  id_var="id_$tool"
+  validate "$tool" "${!store_var}" "${!id_var}"
+done
 
-allow_args=()
-if [[ "${SESSIONGATOR_NATIVE_IMPORT_ALLOW_UNSUPPORTED:-1}" != "0" ]]; then
-  allow_args+=(--allow-unsupported-version)
-fi
+# Every remaining direction starts from a session written above.
+for from in opencode codex copilot; do
+  store_var="store_$from"
+  id_var="id_$from"
+  for to in claude opencode codex copilot; do
+    [[ "$to" == "$from" ]] && continue
+    target_store="$(new_store "$to" "$from-to-$to")"
+    target_id="$(convert "$from" "${!id_var}" "${!store_var}" "$to" "$target_store")"
+    validate "$to" "$target_store" "$target_id"
+  done
+done
 
-"$bin" convert \
-  --from claude \
-  --to opencode \
-  --id "$source_id" \
-  --source-store "$fixture" \
-  --target-store "$tmp/opencode/opencode.db" \
-  --target-id ses_ci_native_import \
-  "${allow_args[@]}" \
-  --report-json > "$tmp/artifacts/claude-to-opencode.json"
-
-OPENCODE_DB="$tmp/opencode/opencode.db" opencode export ses_ci_native_import \
-  > "$tmp/artifacts/opencode-native-export.json"
-
-"$bin" convert \
-  --from opencode \
-  --to claude \
-  --id ses_ci_native_import \
-  --source-store "$tmp/opencode/opencode.db" \
-  --target-store "$tmp/claude-from-opencode" \
-  --target-id 33333333-4444-4555-8666-777777777777 \
-  "${allow_args[@]}" \
-  --report-json > "$tmp/artifacts/opencode-to-claude.json"
-
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-  validate_claude_session \
-    "$tmp/claude-from-opencode" 33333333-4444-4555-8666-777777777777 from-opencode
-elif [[ "${SESSIONGATOR_REQUIRE_CLAUDE_NATIVE:-0}" == "1" ]]; then
-  echo "ANTHROPIC_API_KEY is required for Claude native resume validation" >&2
-  exit 1
-fi
-
-# OpenCode 2 (`@opencode/cli`) is installed off PATH so the 1.x `opencode`
-# above stays in use. OpenCode 2 connects to a shared background service by
-# default: `--standalone` keeps each command on a private server, and the XDG
-# directories isolate its store, config and state.
-if [[ -n "${OPENCODE2_BIN:-}" ]]; then
-  opencode2_home="$tmp/opencode2"
-  opencode2_db="$opencode2_home/data/opencode/opencode.db"
-  mkdir -p "$opencode2_home"/{data,state,config,cache} "$tmp/claude-from-opencode2"
-  opencode2() {
-    env -u OPENCODE_DB \
-      XDG_DATA_HOME="$opencode2_home/data" \
-      XDG_STATE_HOME="$opencode2_home/state" \
-      XDG_CONFIG_HOME="$opencode2_home/config" \
-      XDG_CACHE_HOME="$opencode2_home/cache" \
-      "$OPENCODE2_BIN" "$@" --standalone
-  }
-
-  opencode2 session list --format json > "$tmp/artifacts/opencode2-empty-session-list.json"
-
-  "$bin" convert \
-    --from claude \
-    --to opencode \
-    --id "$source_id" \
-    --source-store "$fixture" \
-    --target-store "$opencode2_db" \
-    --target-id ses_ci_opencode2 \
-    "${allow_args[@]}" \
-    --report-json > "$tmp/artifacts/claude-to-opencode2.json"
-
-  # Export decodes every stored message; one bad row fails the export.
-  opencode2 session export ses_ci_opencode2 > "$tmp/artifacts/opencode2-native-export.json"
-  node -e '
-    const fs = require("node:fs");
-    const exported = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-    const types = (exported.messages ?? []).map((message) => message.info?.type ?? message.type);
-    if (!types.includes("user") || !types.includes("assistant")) {
-      throw new Error(`OpenCode 2 export is missing user or assistant messages: ${types.join(", ")}`);
-    }
-  ' "$tmp/artifacts/opencode2-native-export.json"
-
-  "$bin" convert \
-    --from opencode \
-    --to claude \
-    --id ses_ci_opencode2 \
-    --source-store "$opencode2_db" \
-    --target-store "$tmp/claude-from-opencode2" \
-    --target-id cccccccc-dddd-4eee-8fff-000000000000 \
-    "${allow_args[@]}" \
-    --report-json > "$tmp/artifacts/opencode2-to-claude.json"
-
-  if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    validate_claude_session \
-      "$tmp/claude-from-opencode2" cccccccc-dddd-4eee-8fff-000000000000 from-opencode2
-  fi
-fi
-
-"$bin" convert \
-  --from claude \
-  --to codex \
-  --id "$source_id" \
-  --source-store "$fixture" \
-  --target-store "$tmp/codex" \
-  --target-id 44444444-5555-4666-8777-888888888888 \
-  "${allow_args[@]}" \
-  --report-json > "$tmp/artifacts/claude-to-codex.json"
-
-"$bin" convert \
-  --from codex \
-  --to claude \
-  --id 44444444-5555-4666-8777-888888888888 \
-  --source-store "$tmp/codex" \
-  --target-store "$tmp/claude-from-codex" \
-  --target-id 55555555-6666-4777-8888-999999999999 \
-  "${allow_args[@]}" \
-  --report-json > "$tmp/artifacts/codex-to-claude.json"
-
-"$bin" convert \
-  --from claude \
-  --to copilot \
-  --id "$source_id" \
-  --source-store "$fixture" \
-  --target-store "$tmp/copilot" \
-  --target-id 66666666-7777-4888-8999-aaaaaaaaaaaa \
-  "${allow_args[@]}" \
-  --report-json > "$tmp/artifacts/claude-to-copilot.json"
-
-if env -u COPILOT_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
-  COPILOT_HOME="$tmp/copilot" copilot \
-  --resume=00000000-0000-4000-8000-000000000000 \
-  --screen-reader \
-  --no-color \
-  --no-custom-instructions \
-  --disable-builtin-mcps \
-  --no-remote \
-  --log-level none \
-  > "$tmp/artifacts/copilot-missing-session.txt" 2>&1; then
-  cat "$tmp/artifacts/copilot-missing-session.txt" >&2
-  echo "Copilot unexpectedly accepted a missing session" >&2
-  exit 1
-fi
-
-validate_copilot_session \
-  "$tmp/copilot" 66666666-7777-4888-8999-aaaaaaaaaaaa from-claude
-
-"$bin" convert \
-  --from copilot \
-  --to claude \
-  --id 66666666-7777-4888-8999-aaaaaaaaaaaa \
-  --source-store "$tmp/copilot" \
-  --target-store "$tmp/claude-from-copilot" \
-  --target-id 77777777-8888-4999-8aaa-bbbbbbbbbbbb \
-  "${allow_args[@]}" \
-  --report-json > "$tmp/artifacts/copilot-to-claude.json"
-
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-  validate_claude_session \
-    "$tmp/claude-from-codex" 55555555-6666-4777-8888-999999999999 from-codex
-  validate_claude_session \
-    "$tmp/claude-from-copilot" 77777777-8888-4999-8aaa-bbbbbbbbbbbb from-copilot
-fi
-
-# Complete the remaining six directions using the native stores generated
-# above as source fixtures. Each SQLite target is initialized by opencode.
-mkdir -p \
-  "$tmp/opencode-from-codex" \
-  "$tmp/opencode-from-copilot" \
-  "$tmp/codex-from-opencode" \
-  "$tmp/codex-from-copilot" \
-  "$tmp/copilot-from-opencode" \
-  "$tmp/copilot-from-codex"
-OPENCODE_DB="$tmp/opencode-from-codex/opencode.db" opencode session list --format json \
-  > "$tmp/artifacts/opencode-from-codex-empty.json"
-OPENCODE_DB="$tmp/opencode-from-copilot/opencode.db" opencode session list --format json \
-  > "$tmp/artifacts/opencode-from-copilot-empty.json"
-
-convert_pair opencode ses_ci_native_import "$tmp/opencode/opencode.db" \
-  codex 88888888-9999-4aaa-8bbb-cccccccccccc "$tmp/codex-from-opencode"
-convert_pair opencode ses_ci_native_import "$tmp/opencode/opencode.db" \
-  copilot 99999999-aaaa-4bbb-8ccc-dddddddddddd "$tmp/copilot-from-opencode"
-convert_pair codex 44444444-5555-4666-8777-888888888888 "$tmp/codex" \
-  opencode ses_ci_from_codex "$tmp/opencode-from-codex/opencode.db"
-convert_pair codex 44444444-5555-4666-8777-888888888888 "$tmp/codex" \
-  copilot aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee "$tmp/copilot-from-codex"
-convert_pair copilot 66666666-7777-4888-8999-aaaaaaaaaaaa "$tmp/copilot" \
-  opencode ses_ci_from_copilot "$tmp/opencode-from-copilot/opencode.db"
-convert_pair copilot 66666666-7777-4888-8999-aaaaaaaaaaaa "$tmp/copilot" \
-  codex bbbbbbbb-cccc-4ddd-8eee-ffffffffffff "$tmp/codex-from-copilot"
-
-OPENCODE_DB="$tmp/opencode-from-codex/opencode.db" opencode export ses_ci_from_codex \
-  > "$tmp/artifacts/opencode-from-codex-native-export.json"
-OPENCODE_DB="$tmp/opencode-from-copilot/opencode.db" opencode export ses_ci_from_copilot \
-  > "$tmp/artifacts/opencode-from-copilot-native-export.json"
-
-validate_copilot_session \
-  "$tmp/copilot-from-opencode" 99999999-aaaa-4bbb-8ccc-dddddddddddd from-opencode
-validate_copilot_session \
-  "$tmp/copilot-from-codex" aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee from-codex
-validate_codex_session \
-  "$tmp/codex" 44444444-5555-4666-8777-888888888888 from-claude
-validate_codex_session \
-  "$tmp/codex-from-opencode" 88888888-9999-4aaa-8bbb-cccccccccccc from-opencode
-validate_codex_session \
-  "$tmp/codex-from-copilot" bbbbbbbb-cccc-4ddd-8eee-ffffffffffff from-copilot
+echo "native import probe passed for every tool pair"

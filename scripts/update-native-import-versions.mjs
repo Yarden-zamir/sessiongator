@@ -1,212 +1,111 @@
 #!/usr/bin/env node
+// Record tool versions in docs/specs/native-session-import-versions.toml.
+//
+//   node scripts/update-native-import-versions.mjs --status probe-passed \
+//     --source ci-probe --notes "..." claude opencode codex copilot
+//
+// A bare tool name records its installed version (`<tool> --version`);
+// `tool=1.2.3` records that version. An existing entry only moves up
+// (probe-passed -> verified), never down. Prints each added or changed entry.
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
-const manifestPath = path.join(repoRoot, "docs/specs/native-session-import-versions.toml");
+const RANK = { "probe-passed": 1, verified: 2 };
+const TOOLS = ["claude", "opencode", "codex", "copilot"];
+const manifestPath = path.join(
+  path.dirname(new URL(import.meta.url).pathname),
+  "../docs/specs/native-session-import-versions.toml",
+);
 
-const args = new Map();
-for (let index = 2; index < process.argv.length; index += 1) {
-  const name = process.argv[index];
-  if (!name.startsWith("--")) {
-    throw new Error(`unexpected argument: ${name}`);
+const options = { status: null, source: null, notes: "" };
+const requested = [];
+const argv = process.argv.slice(2);
+for (let index = 0; index < argv.length; index += 1) {
+  const arg = argv[index];
+  if (arg.startsWith("--")) {
+    const key = arg.slice(2);
+    if (!(key in options) || argv[index + 1] === undefined) {
+      throw new Error(`unknown option or missing value: ${arg}`);
+    }
+    options[key] = argv[index + 1];
+    index += 1;
+  } else {
+    requested.push(arg);
   }
-  const value = process.argv[index + 1];
-  if (value === undefined || value.startsWith("--")) {
-    throw new Error(`${name} requires a value`);
-  }
-  args.set(name.slice(2), value);
-  index += 1;
+}
+if (!(options.status in RANK)) {
+  throw new Error(`--status must be one of: ${Object.keys(RANK).join(", ")}`);
+}
+if (!options.source) {
+  throw new Error("--source is required");
 }
 
-const latest = [
-  toolEntry("claude", args.get("claude")),
-  toolEntry("opencode", args.get("opencode")),
-  toolEntry("opencode2", args.get("opencode2")),
-  toolEntry("codex", args.get("codex")),
-  toolEntry("copilot", args.get("copilot")),
-].filter(Boolean);
-
-if (latest.length === 0) {
-  console.log("no tool versions supplied; manifest unchanged");
-  process.exit(0);
-}
-
+const blockSeparator = "\n[[tools]]\n";
 let manifest = fs.readFileSync(manifestPath, "utf8");
-const additions = [];
-const newEntries = [];
+const [header, ...blocks] = manifest.split(blockSeparator);
+const changes = [];
 
-for (const entry of latest) {
-  const currentStatus = toolVersionStatus(manifest, entry.tool, entry.version);
-  if (currentStatus === entry.status) {
-    continue;
+for (const item of requested) {
+  const [tool, explicit] = item.split("=");
+  if (!TOOLS.includes(tool)) {
+    throw new Error(`unknown tool: ${tool}`);
   }
-  if (currentStatus !== null) {
-    manifest = replaceToolVersionEntry(manifest, entry);
-    additions.push(renderEntry(entry));
-    continue;
+  const version = explicit ?? installedVersion(tool);
+  if (!version) {
+    throw new Error(`cannot detect the ${tool} version`);
   }
-  additions.push(renderEntry(entry));
-  newEntries.push(renderEntry(entry));
+  const entry = renderEntry({ tool, version, ...options });
+  const index = blocks.findIndex(
+    (block) => value(block, "tool") === tool && value(block, "version") === version,
+  );
+  if (index < 0) {
+    blocks.push(entry);
+    changes.push(entry);
+  } else if (RANK[options.status] > (RANK[value(blocks[index], "status")] ?? 0)) {
+    blocks[index] = entry;
+    changes.push(entry);
+  }
 }
 
-if (additions.length === 0) {
-  console.log("native import version manifest already lists latest detected versions");
+if (changes.length === 0) {
+  console.error("manifest already lists these versions with this status or higher");
   process.exit(0);
 }
-
-if (newEntries.length > 0) {
-  manifest = `${manifest.trimEnd()}\n\n${newEntries.join("\n").trimEnd()}\n`;
-} else {
-  manifest = `${manifest.trimEnd()}\n`;
-}
+manifest = [header, ...blocks.map((block) => block.trimEnd() + "\n")].join(blockSeparator);
 fs.writeFileSync(manifestPath, manifest);
-
-for (const addition of additions) {
-  process.stdout.write(addition);
+for (const change of changes) {
+  process.stdout.write(`[[tools]]\n${change}\n`);
 }
 
-function toolEntry(tool, rawVersion) {
-  const version = normalizeVersion(rawVersion);
-  if (!version) {
+/// First dotted version in `<tool> --version` output, without a `v` prefix.
+function installedVersion(tool) {
+  const result = spawnSync(tool, ["--version"], { encoding: "utf8" });
+  if (result.status !== 0) {
     return null;
   }
-  if (tool === "claude") {
-    const nativeValidated = args.get("claude-native") === "true";
-    return {
-      tool,
-      version,
-      source: nativeValidated
-        ? "ci-native-harness-resume"
-        : "ci-sessiongator-roundtrip",
-      status: nativeValidated ? "target-supported" : "probe-passed",
-      store: "jsonl-projects",
-      fixtureRoot: "fixtures/native-import/claude/2.1.199",
-      notes:
-        nativeValidated
-          ? "CI resumed the isolated generated session through Claude Code and received the exact no-tools probe response."
-          : "CI latest-tool probe passed dry-run and isolated target-store writes against the same projects JSONL layout as 2.1.199.",
-    };
+  for (const token of result.stdout.split(/\s+/)) {
+    const candidate = token.replace(/^v/, "").replace(/\.$/, "");
+    if (/^\d+(\.\d+)+$/.test(candidate)) {
+      return candidate;
+    }
   }
-  if (tool === "opencode") {
-    return {
-      tool,
-      version,
-      source: "ci-native-harness-export",
-      status: "target-supported",
-      store: "sqlite",
-      fixtureRoot: "fixtures/native-import/opencode/1.17.13",
-      notes:
-        "CI initialized the isolated SQLite store through opencode, then opencode exported the sessiongator-written session successfully.",
-    };
-  }
-  // OpenCode 2 keeps the `opencode` tool name; the version tells 1.x and 2.x apart.
-  if (tool === "opencode2") {
-    return {
-      tool: "opencode",
-      version,
-      source: "ci-native-harness-export",
-      status: "target-supported",
-      store: "sqlite-session-v2",
-      fixtureRoot: "fixtures/native-import/claude/2.1.199",
-      notes:
-        "CI initialized an isolated OpenCode 2 store with --standalone, then opencode session export decoded every sessiongator-written message.",
-    };
-  }
-  if (tool === "codex") {
-    const nativeValidated = args.get("codex-native") === "true";
-    return {
-      tool,
-      version,
-      source: nativeValidated
-        ? "ci-native-harness-read"
-        : "ci-sessiongator-roundtrip",
-      status: nativeValidated ? "target-supported" : "probe-passed",
-      store: "rollout-jsonl",
-      fixtureRoot: "fixtures/native-import/codex/0.142.5",
-      notes:
-        nativeValidated
-          ? "Codex app-server thread/read projected non-empty turns from Claude, opencode, and Copilot-origin imports."
-          : "CI latest-tool probe passed isolated rollout JSONL writes and readback through the Codex adapter.",
-    };
-  }
-  if (tool === "copilot") {
-    return {
-      tool,
-      version,
-      source: "ci-native-harness-resume",
-      status: "target-supported",
-      store: "session-store-sqlite-plus-session-state",
-      fixtureRoot: "fixtures/native-import/copilot/1.0.68",
-      notes:
-        "CI confirmed copilot --resume discovers and parses the isolated session without authentication or a model request.",
-    };
-  }
-  throw new Error(`unsupported tool: ${tool}`);
+  return null;
 }
 
-function normalizeVersion(rawVersion) {
-  if (!rawVersion || rawVersion === "null") {
-    return null;
-  }
-  const firstToken = rawVersion.trim().split(" ").filter(Boolean)[0] ?? "";
-  const version = firstToken.startsWith("v") ? firstToken.slice(1) : firstToken;
-  return version.length > 0 ? version : null;
+function value(block, key) {
+  const line = block.split("\n").find((line) => line.startsWith(`${key} = "`));
+  return line ? line.slice(key.length + 4).split('"')[0] : null;
 }
 
-function toolVersionStatus(manifest, tool, version) {
-  const blocks = manifest.split("[[tools]]").slice(1);
-  const block = blocks.find((block) => {
-    return (
-      tomlValue(block, "tool") === tool &&
-      tomlValue(block, "version") === version
-    );
-  });
-  return block ? tomlValue(block, "status") : null;
-}
-
-function replaceToolVersionEntry(manifest, entry) {
-  const marker = "[[tools]]";
-  const blocks = manifest.split(marker);
-  const index = blocks.findIndex((block, blockIndex) => {
-    return (
-      blockIndex > 0 &&
-      tomlValue(block, "tool") === entry.tool &&
-      tomlValue(block, "version") === entry.version
-    );
-  });
-  if (index < 0) {
-    throw new Error(`missing manifest entry for ${entry.tool} ${entry.version}`);
-  }
-  blocks[index] = `\n${renderEntry(entry).slice(marker.length).trim()}\n\n`;
-  return blocks.join(marker).trimEnd();
-}
-
-function tomlValue(block, key) {
-  const prefix = `${key} = `;
-  const line = block
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.startsWith(prefix));
-  if (!line) {
-    return null;
-  }
-  const value = line.slice(prefix.length).trim();
-  if (!value.startsWith('"')) {
-    return null;
-  }
-  return value.slice(1).split('"')[0];
-}
-
-function renderEntry(entry) {
-  return `[[tools]]
-tool = "${entry.tool}"
-version = "${entry.version}"
-status = "${entry.status}"
-source = "${entry.source}"
-store = "${entry.store}"
-fixture_root = "${entry.fixtureRoot}"
-notes = "${entry.notes}"
-`;
+function renderEntry({ tool, version, status, source, notes }) {
+  const quote = (text) => JSON.stringify(text);
+  return [
+    `tool = ${quote(tool)}`,
+    `version = ${quote(version)}`,
+    `status = ${quote(status)}`,
+    `source = ${quote(source)}`,
+    `notes = ${quote(notes)}`,
+  ].join("\n") + "\n";
 }

@@ -9,7 +9,7 @@ This spec covers both directions:
 - `--from codex`: read Codex CLI native sessions and convert them into Claude Code, opencode, or another supported target.
 - `--to codex`: write a converted session into Codex CLI's native local store so `codex resume` / Codex session discovery can load it.
 
-Codex support must be version-gated. Unknown source or target versions fail closed unless the user passes `--allow-unsupported-version`.
+Codex support must be version-gated as in the native session import Version Policy. Unsupported target versions fail closed unless the user passes `--allow-unsupported-version`; untested source versions only warn.
 
 ## Current Research Snapshot
 
@@ -54,7 +54,7 @@ Upstream rollout model observations:
 - Do not write `auth.json`, tokens, account state, model caches, shell snapshots, skills, or temp/vendor directories.
 - Do not import Codex rollout traces unless the user explicitly points at a trace bundle; traces are diagnostic artifacts, not the default native session store.
 - Do not synthesize successful shell/tool execution that did not happen in the source session.
-- Do not write into a live Codex store without an explicit backup and atomic-write plan.
+- Do not write into a live Codex store without an atomic-write plan. `sessiongator undo --target` replaces file backups.
 - Do not support Codex Cloud tasks or app/IDE-only remote state until their local persistence is separately sampled.
 
 ## User-Facing Behavior
@@ -69,11 +69,11 @@ sessiongator convert --from opencode --to codex --id <session-id> --target-store
 
 Codex-specific options:
 
-- `--source-store <path>`: Codex config root. Defaults to `$CODEX_HOME` if Codex supports it for the installed version, else `~/.codex`.
-- `--target-store <path>`: Codex config root for writes. Defaults to the same root.
+- `--source-store <path>`: one Codex config root. Without it, sessiongator reads `$CODEX_HOME` and `~/.codex`.
+- `--target-store <path>`: Codex config root for writes. Default: `$CODEX_HOME`, else `~/.codex`.
 - `--target-id <uuid>`: target Codex thread id. Default: generated UUID.
-- `--title <title>`: target thread name. When set, append a `session_index.jsonl` entry.
-- `--include-diagnostics`: include diagnostic trace references if present and explicitly requested.
+- `--title <title>`: target thread name. Every write appends a `session_index.jsonl` entry with the title.
+- Not built: `--include-diagnostics`.
 
 Exit codes follow the native import spec.
 
@@ -85,28 +85,25 @@ Read Codex sessions from:
 
 - `sessions/**/*.jsonl`
 - `archived_sessions/**/*.jsonl`
-- `session_index.jsonl` for latest human-readable names
-- `state_5.sqlite` `threads` metadata when present and non-empty
+- Not read yet: `session_index.jsonl` names and `state_5.sqlite` `threads` metadata.
 
 Discovery rules:
 
-- Prefer SQLite metadata for fast listing only when the rollout path still exists and resolves to the same thread id.
-- Fall back to scanning rollout JSONL files when the DB is missing, empty, stale, or corrupted.
+- List by scanning rollout JSONL files; the id comes from the file name.
 - Treat the rollout file as the source of truth for transcript/history.
+- Current Codex writes each visible message twice, as `response_item` and as `event_msg`. Read the `event_msg` copy when the rollout has one, else the `response_item` copy, so no message appears twice.
 - Never infer cwd from the dated directory path; read it from `SessionMeta` / extracted metadata.
 
 ### Parsing
 
 Map Codex rollout items into `NativeSession`:
 
-- `SessionMeta` -> session id, cwd, created time, CLI version, model provider, source, history mode, parent/fork relationships, selected capability roots.
-- User-visible prompt items -> `NativeRole::User` text or attachment parts.
-- Assistant/model output items -> `NativeRole::Assistant` text, reasoning, and tool-call parts where represented natively.
-- Tool call/result items -> `NativePart::ToolCall` / `NativePart::ToolResult` with raw payload preserved in metadata.
-- Compaction/checkpoint items -> `NativeRole::Compaction` or metadata, depending on target support.
-- Multi-agent child thread metadata -> parent/child extras and optional sidecar session references.
-
-Unknown rollout item variants must be preserved as `NativePart::Raw` or session metadata, not silently dropped.
+- `SessionMeta` -> cwd, title, created time, CLI version, model provider.
+- User-visible prompt items -> `NativeRole::User` text.
+- Assistant/model output items -> `NativeRole::Assistant` text; `reasoning` items -> reasoning parts.
+- `function_call` / `function_call_output` / `web_search_call` -> `NativePart::ToolCall` / `NativePart::ToolResult`.
+- Unknown `response_item` payload types -> `NativePart::Raw`, reported as dropped in the plan. Other top-level line types are skipped.
+- Not built: compaction/checkpoint items, multi-agent child threads, parent/fork relationships, attachments.
 
 ## Target Adapter
 
@@ -117,35 +114,32 @@ Writing to Codex requires at least:
 - A rollout JSONL under `sessions/<year>/<month>/<day>/rollout-<timestamp>-<thread-id>.jsonl`.
 - A first metadata line equivalent to Codex `SessionMeta`.
 - Canonical top-level `session_meta`, `response_item`, and `event_msg` rollout envelopes for mapped messages; user/agent event messages provide Codex turn projection while response items retain model history.
-- Optional `session_index.jsonl` entry when a title/name is available.
-- Optional `state_5.sqlite` metadata upsert if the target version's state DB is initialized and schema-compatible.
-
-The initial implementation should write a rollout JSONL and `session_index.jsonl` first, then let Codex backfill SQLite metadata when it next opens the store if the installed version supports that path. Direct SQLite writes should be a later phase gated by schema fingerprint tests.
+- A `session_index.jsonl` entry with the title.
+- No `state_5.sqlite` write: Codex backfills its metadata from the rollout. The probe's app-server `thread/read` projects imported sessions without it.
 
 ### Atomicity
 
-- Write rollout to `*.jsonl.tmp`, flush, then rename.
-- Append `session_index.jsonl` only after rollout rename succeeds.
-- If direct SQLite writes are enabled later, use a transaction and verify the stored `rollout_path` points to the new file.
-- Back up `session_index.jsonl` and `state_5.sqlite*` before live-store writes.
+- Write the rollout to a temp file, then rename.
+- Append `session_index.jsonl` only after the rollout rename succeeds.
+- No file backups: `sessiongator undo --target` moves the rollout to the trash and removes its `session_index.jsonl` lines.
 
 ### Verification
 
 After writing:
 
-- Re-read the rollout through sessiongator's Codex source adapter.
-- Verify id, cwd, title/preview, message count, mapped part counts, and model/provider metadata.
-- If Codex CLI exposes a non-interactive list/resume check for the installed version, run it only in isolated target-store CI.
+- `convert` re-reads the rollout through the Codex store and compares title, cwd, and the count of user and assistant messages that hold text. A mismatch moves the written session to the trash and fails.
+- The CI probe runs Codex app-server `thread/read` in an isolated `CODEX_HOME` and requires a non-empty turn.
+- The full pass resumes the session with `codex exec resume <id>` and a real model.
 
 ## Mapping Policy
 
 High-confidence mappings:
 
 - Text messages map directly.
-- Model id/provider maps to Codex model/model provider metadata where available.
-- cwd maps to `SessionMeta.cwd` and SQLite `threads.cwd` if direct DB write is enabled.
+- Model provider maps to `SessionMeta.model_provider`.
+- cwd maps to `SessionMeta.cwd`.
 - source session id maps into provenance metadata.
-- tool calls/results map to Codex rollout items only after fixture verification for the target version.
+- Not built: tool calls/results, reasoning, and non-text parts are not written to Codex; only user and assistant text is.
 
 Lossy mappings requiring warnings:
 
@@ -163,24 +157,17 @@ Blocked by default:
 
 ## Version Policy
 
-Add `codex` entries to `docs/specs/native-session-import-versions.toml` after fixture validation.
+Codex follows the Version Policy of `native-session-import.md`; `codex` entries live in `docs/specs/native-session-import-versions.toml`.
 
-Required support metadata:
+Recorded support metadata:
 
-- CLI version from `codex --version`.
-- Rollout schema fingerprint from observed JSONL item variants and `SessionMeta` keys.
-- State DB fingerprint from SQLite tables, columns, indexes, and `_sqlx_migrations` versions when DB is initialized.
-- Whether target writing uses JSONL-only or JSONL plus SQLite metadata.
-
-Default support policy:
-
-- Read support may allow patch versions with identical rollout item fingerprints.
-- Write support requires exact known-good versions until CI proves compatibility.
-- Direct SQLite writes require exact migration fingerprints.
+- CLI version from `codex --version`, and `cli_version` from `SessionMeta` for sources.
+- A store fingerprint with the rollout count and whether `session_index.jsonl` exists.
+- Not recorded yet: rollout item variant and state DB fingerprints. sessiongator writes JSONL only.
 
 ## Fixtures
 
-Add sanitized fixtures under:
+Not built: tests create Codex rollouts inline in `src/stores/codex.rs`. Planned sanitized fixtures:
 
 ```text
 fixtures/native-import/codex/<version>/
@@ -203,35 +190,32 @@ Fixtures must redact secrets, absolute private paths outside the cwd, command ou
 
 ## CI Plan
 
-- Install latest Codex CLI in the native import compatibility workflow.
-- Generate an isolated Codex home and a minimal session if Codex supports non-interactive scripted session creation for the installed version.
-- Run `sessiongator convert --from codex --dry-run --plan-json` against fixture and generated sessions.
-- Run fixture-backed writes to an isolated Codex home.
-- Re-run the Codex adapter readback on the written store.
-- If latest Codex passes with an unknown version/schema, open a manifest-update PR instead of committing directly to `main`.
+- The daily probe installs the latest Codex CLI, converts into and out of isolated Codex homes, and checks each written session with app-server `thread/read`.
+- The full pass on the VPS resumes an imported session with a real model; it needs a Codex login in `FULL_PASS_CODEX_HOME`.
+- Both open a manifest-update pull request instead of committing to `main`.
 
 ## Implementation Phases
 
-1. Add `Tool::Codex` display/list support from rollout JSONL only.
-2. Add Codex native reader into `NativeSession` with conservative raw preservation.
-3. Add Codex dry-run conversion plans to existing Claude/opencode targets.
-4. Add Codex JSONL-only writer into isolated target stores.
-5. Add `session_index.jsonl` title/name writes.
-6. Add optional `state_5.sqlite` metadata writes after migration-fingerprint CI.
-7. Add live-store backup/locking and TUI conversion support.
+1. ✅ Add `Tool::Codex` display/list support from rollout JSONL only.
+2. ✅ Add Codex native reader into `NativeSession` with conservative raw preservation.
+3. ✅ Add Codex dry-run conversion plans to existing Claude/opencode targets.
+4. ✅ Add Codex JSONL-only writer.
+5. ✅ Add `session_index.jsonl` title/name writes.
+6. ⬜ Add optional `state_5.sqlite` metadata writes after migration-fingerprint CI.
+7. ✅ Live writes use atomic renames and `undo`; TUI conversion is the `Ctrl+T` dry-run command.
 
 ## Acceptance Criteria
 
-- `sessiongator --list` can include Codex sessions without reading secrets.
+- `sessiongator list` can include Codex sessions without reading secrets.
 - `sessiongator convert --from codex --dry-run --plan-json` reports mapped/dropped/synthesized fields.
-- JSONL-only Codex target writes round-trip through the Codex reader.
-- Unknown Codex versions fail closed by default.
-- Fixture tests cover text, tool use/result, reasoning, attachments, compaction, and multi-agent metadata.
-- Live writes back up touched files and never mutate auth/config files.
+- JSONL-only Codex target writes round-trip through the Codex reader, and every write is read back.
+- Unsupported Codex target versions fail closed by default.
+- Inline tests cover text, tool use/result, and the two message copies; attachments, compaction, and multi-agent metadata are not covered.
+- Live writes never mutate auth/config files; `undo --target` removes a written session.
 
 ## Open Questions
 
-- Which Codex command is the safest non-interactive resume/list verifier for isolated target homes?
-- Does the installed Codex version honor `CODEX_HOME`, or must tests override home/config by another documented mechanism?
+- Answered: app-server `thread/read` is the model-free verifier; `codex exec resume <id>` is the model check.
+- Answered: Codex honors `CODEX_HOME`; its login file lives there.
 - Which rollout item variants are required for Codex UI resume versus only useful for analytics/memories?
 - Can Codex rebuild `state_5.sqlite` from rollouts reliably for imported sessions, or do current versions require direct SQLite upserts for session pickers?

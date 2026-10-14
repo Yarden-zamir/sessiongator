@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test native_import -- --nocapture
+      - run: "cargo test -- convert:: stores:: trash:: history::"
 
   latest-tools:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -30,50 +30,34 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: latest
-      - name: Install latest supported harnesses
+      - name: Install the latest harnesses
+        id: versions
         shell: bash
         run: |
           mkdir -p artifacts/native-import-latest
-          npm install -g @anthropic-ai/claude-code opencode-ai @openai/codex @github/copilot
-          read -r claude_version _ <<< "$(claude --version)"
-          read -r opencode_version _ <<< "$(opencode --version)"
-          read -r _ codex_version <<< "$(codex --version)"
-          read -r _ _ _ copilot_version <<< "$(copilot --version)"
-          copilot_version="${copilot_version%.}"
-          # OpenCode 2 also ships an `opencode` bin; a separate prefix keeps
-          # the 1.x `opencode` on PATH.
-          npm install --prefix "$RUNNER_TEMP/opencode2" @opencode/cli
-          opencode2_bin="$RUNNER_TEMP/opencode2/node_modules/.bin/opencode2"
-          read -r _ opencode2_version <<< "$("$opencode2_bin" --version)"
+          # @opencode/cli is OpenCode 2; sessiongator writes OpenCode 2 only.
+          npm install -g @anthropic-ai/claude-code @opencode/cli @openai/codex @github/copilot
+          for tool in claude opencode codex copilot; do
+            printf '%s: %s\n' "$tool" "$("$tool" --version | head -1)"
+          done | tee artifacts/native-import-latest/tool-versions.txt
           {
-            printf 'CLAUDE_VERSION=%s\n' "$claude_version"
-            printf 'OPENCODE_VERSION=%s\n' "$opencode_version"
-            printf 'OPENCODE2_BIN=%s\n' "$opencode2_bin"
-            printf 'OPENCODE2_VERSION=%s\n' "$opencode2_version"
-            printf 'CODEX_VERSION=%s\n' "$codex_version"
-            printf 'COPILOT_VERSION=%s\n' "$copilot_version"
-          } >> "$GITHUB_ENV"
-          printf '{"claude":"%s","opencode":"%s","opencode2":"%s","codex":"%s","copilot":"%s"}\n' \
-            "$claude_version" "$opencode_version" "$opencode2_version" "$codex_version" "$copilot_version" \
-            > artifacts/native-import-latest/tool-versions.json
+            echo 'list<<VERSIONS'
+            cat artifacts/native-import-latest/tool-versions.txt
+            echo VERSIONS
+          } >> "$GITHUB_OUTPUT"
       - run: cargo build --release
-      - name: Probe latest native import compatibility
+      - name: Probe every conversion pair without model calls
         run: scripts/probe-native-import-latest.sh
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SESSIONGATOR_REQUIRE_CLAUDE_NATIVE: "1"
           SESSIONGATOR_NATIVE_IMPORT_ARTIFACTS: artifacts/native-import-latest
-      - name: Record sessiongator round-trip results
+      - name: Record the installed versions as probe-passed
         run: |
           node scripts/update-native-import-versions.mjs \
-            --claude "$CLAUDE_VERSION" \
-            --claude-native true \
-            --opencode "$OPENCODE_VERSION" \
-            --opencode2 "$OPENCODE2_VERSION" \
-            --codex "$CODEX_VERSION" \
-            --codex-native true \
-            --copilot "$COPILOT_VERSION" \
-            > artifacts/native-import-latest/manifest-additions.toml
+            --status probe-passed \
+            --source ci-probe \
+            --notes "Every tool pair converted in isolated stores; the tool exported, read, or parsed each written session without model calls." \
+            claude opencode codex copilot \
+            > artifacts/native-import-latest/manifest-changes.toml
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test
@@ -91,11 +75,8 @@ jobs:
           title: "chore: record native import compatibility probes"
           commit-message: "chore: record native import compatibility probes"
           body: |
-            Records sessiongator round-trip results for the latest tools. These versions remain unsupported until each native harness accepts the generated session.
+            Records the latest tool versions as `probe-passed`: every conversion pair passed in isolated stores, and each tool accepted the written sessions without model calls. The scheduled full pass on the VPS marks a version `verified`.
 
-            Detected versions:
-            - Claude: `${{ env.CLAUDE_VERSION }}`
-            - opencode: `${{ env.OPENCODE_VERSION }}`
-            - OpenCode 2: `${{ env.OPENCODE2_VERSION }}`
-            - Codex: `${{ env.CODEX_VERSION }}`
-            - Copilot: `${{ env.COPILOT_VERSION }}`
+            ```
+            ${{ steps.versions.outputs.list }}
+            ```

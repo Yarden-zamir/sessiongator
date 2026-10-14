@@ -9,6 +9,8 @@ keywords = ["tui", "ratatui", "sessions", "claude", "opencode"]
 categories = ["command-line-interface", "development-tools"]
 
 [dependencies]
+clap = { version = "4.6", features = ["derive"] }
+clap_complete = "4.6"
 crossterm = "0.29"
 figment = { version = "0.10", features = ["toml"] }
 gator = { git = "https://github.com/Yarden-zamir/gator", branch = "main" }

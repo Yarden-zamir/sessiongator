@@ -5,8 +5,9 @@ use ratatui::{
     widgets::ListItem,
 };
 
-use crate::model::{rel_time, shorten_home, Session};
-use crate::sources::Turn;
+use crate::model::{shorten_home, Session};
+use crate::native::Turn;
+use crate::time::{format_utc, rel_time};
 use gator::text::{highlight_line as highlighted_line, wrap_text_line};
 
 // The theme (Theme + Palette + OS dark-mode detection) is shared across the
@@ -138,7 +139,7 @@ pub fn transcript_text(
         meta.push(model.clone());
     }
     meta.push(format!("{} msgs", session.message_count));
-    meta.push(crate::model::format_utc(session.updated_ms));
+    meta.push(format_utc(session.updated_ms));
     for (key, value) in &session.extras {
         meta.push(format!("{key}={value}"));
     }

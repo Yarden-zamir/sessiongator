@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::model::Session;
+use crate::model::{clean_title, Session};
+use crate::time::{now_ms, rel_time};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
@@ -63,6 +64,98 @@ pub fn filter_sessions(
         .collect()
 }
 
+/// The one session that `reference` names. An exact `tool:id` or id wins.
+/// Otherwise the candidates are id prefixes plus title/path/model matches, and
+/// the reference must match exactly one of them, so a word that happens to be
+/// a hex id prefix never silently picks another session.
+pub fn resolve_session<'a>(
+    sessions: &'a [Session],
+    reference: &str,
+) -> Result<&'a Session, String> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err("empty session reference".to_string());
+    }
+    let exact: Vec<&Session> = sessions
+        .iter()
+        .filter(|session| session.id == reference || session.key() == reference)
+        .collect();
+    if let [session] = exact.as_slice() {
+        return Ok(session);
+    }
+    if !exact.is_empty() {
+        return Err(ambiguous(reference, exact));
+    }
+    let blobs: Vec<String> = sessions.iter().map(Session::search_blob).collect();
+    let text_hits = filter_sessions(
+        sessions,
+        &blobs,
+        reference,
+        SearchMode::Sessions,
+        &HashMap::new(),
+    );
+    let candidates: Vec<&Session> = sessions
+        .iter()
+        .enumerate()
+        .filter(|(index, session)| {
+            session.id.starts_with(reference)
+                || session.key().starts_with(reference)
+                || text_hits.contains(index)
+        })
+        .map(|(_, session)| session)
+        .collect();
+    match candidates.as_slice() {
+        [] => Err(format!("no session matches {reference:?}")),
+        [session] => Ok(session),
+        _ => Err(ambiguous(reference, candidates)),
+    }
+}
+
+fn ambiguous(reference: &str, mut candidates: Vec<&Session>) -> String {
+    const SHOWN: usize = 10;
+    candidates.sort_by_key(|session| std::cmp::Reverse(session.updated_ms));
+    let now = now_ms();
+    let mut message = format!(
+        "{reference:?} matches {} sessions; pass a longer id or tool:id:",
+        candidates.len()
+    );
+    for session in candidates.iter().take(SHOWN) {
+        message.push_str(&format!(
+            "\n  {}  {}  {}",
+            session.key(),
+            rel_time(session.updated_ms, now),
+            session.title
+        ));
+    }
+    if candidates.len() > SHOWN {
+        message.push_str(&format!("\n  … {} more", candidates.len() - SHOWN));
+    }
+    message
+}
+
+/// One-line excerpt of `text` around the first case-insensitive `needle`.
+pub fn match_snippet(text: &str, needle: &str, context_chars: usize) -> Option<String> {
+    let needle = needle.trim().to_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let byte = lower.find(&needle)?;
+    // Lowercasing can change the char count of a few scripts; an offset of a
+    // char or two only shifts the excerpt window.
+    let start_char = lower[..byte].chars().count();
+    let needle_chars = needle.chars().count();
+    let from = start_char.saturating_sub(context_chars);
+    let excerpt: String = text
+        .chars()
+        .skip(from)
+        .take(needle_chars + 2 * context_chars)
+        .collect();
+    let excerpt = clean_title(&excerpt);
+    let prefix = if from > 0 { "…" } else { "" };
+    Some(format!("{prefix}{excerpt}…"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +206,50 @@ mod tests {
         assert_eq!(hits, vec![0]);
         let hits = filter_sessions(&sessions, &blobs, "", SearchMode::Sessions, &content);
         assert_eq!(hits, vec![0, 1]);
+    }
+
+    #[test]
+    fn resolves_exact_ids_prefixes_and_unique_text() {
+        let mut sessions = vec![
+            session("aaaa1111", "Fix rate limiter", "/Users/me/dotfiles"),
+            session("aaaa2222", "Other work", "/Users/me/project"),
+        ];
+        sessions[1].tool = Tool::Codex;
+        assert_eq!(
+            resolve_session(&sessions, "aaaa1111").unwrap().id,
+            "aaaa1111"
+        );
+        assert_eq!(
+            resolve_session(&sessions, "codex:aaaa2222").unwrap().id,
+            "aaaa2222"
+        );
+        assert_eq!(resolve_session(&sessions, "aaaa2").unwrap().id, "aaaa2222");
+        assert_eq!(
+            resolve_session(&sessions, "rate lim").unwrap().id,
+            "aaaa1111"
+        );
+        assert!(resolve_session(&sessions, "aaaa").is_err());
+        assert!(resolve_session(&sessions, "/Users/me").is_err());
+        assert!(resolve_session(&sessions, "nothing here").is_err());
+        assert!(resolve_session(&sessions, " ").is_err());
+    }
+
+    #[test]
+    fn id_prefix_that_also_matches_other_text_is_ambiguous() {
+        let sessions = vec![
+            session("add12345", "Unrelated", "/tmp/a"),
+            session("ffff0000", "add a button", "/tmp/b"),
+        ];
+        let error = resolve_session(&sessions, "add").unwrap_err();
+        assert!(error.contains("matches 2 sessions"), "{error}");
+    }
+
+    #[test]
+    fn snippet_surrounds_the_first_case_insensitive_match() {
+        let snippet = match_snippet("one two\nTHREE four five", "three", 4).unwrap();
+        assert!(snippet.contains("THREE"), "{snippet}");
+        assert!(snippet.starts_with('…'), "{snippet}");
+        assert_eq!(match_snippet("abc", "zzz", 4), None);
     }
 
     #[test]

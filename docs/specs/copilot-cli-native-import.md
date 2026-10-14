@@ -9,7 +9,7 @@ This spec covers both directions:
 - `--from copilot`: read Copilot CLI native sessions and convert them into Claude Code, opencode, Codex CLI, or another supported target.
 - `--to copilot`: write a converted session into Copilot CLI's native local store so `copilot --resume` / the Copilot session picker can load it.
 
-Copilot support must be version-gated. Unknown source or target versions fail closed unless the user passes `--allow-unsupported-version`.
+Copilot support must be version-gated as in the native session import Version Policy. Unsupported target versions fail closed unless the user passes `--allow-unsupported-version`; untested source versions only warn.
 
 ## Current Research Snapshot
 
@@ -72,7 +72,7 @@ Public changelog observations:
 - Do not write GitHub auth tokens, Copilot account config, logs, plugins, skills, IDE metadata, or command history.
 - Do not import/export cloud sandbox state, remote hosted sessions, or GitHub.com task state until separately sampled.
 - Do not fabricate successful tool execution or PR/issue creation that did not happen in the source session.
-- Do not write to live Copilot DBs without backup and SQLite locking.
+- Do not write to live Copilot DBs outside one immediate SQLite transaction. `sessiongator undo --target` replaces file backups.
 
 ## User-Facing Behavior
 
@@ -90,8 +90,7 @@ Copilot-specific options:
 - `--target-store <path>`: Copilot home for writes. Defaults to the same root.
 - `--target-id <uuid>`: Copilot session id. Default: generated UUID.
 - `--title <title>`: target session summary/name where the target schema supports it.
-- `--include-checkpoints`: map source compactions/summaries to Copilot checkpoints where safe.
-- `--legacy`: read legacy `history-session-state` sessions. Read-only until fixtures exist.
+- Not built: `--include-checkpoints` (map source compactions/summaries to Copilot checkpoints) and `--legacy` (read legacy `history-session-state` sessions).
 
 Exit codes follow the native import spec.
 
@@ -101,17 +100,15 @@ Exit codes follow the native import spec.
 
 Read modern Copilot sessions from:
 
-- `session-store.db` for fast listing and search metadata.
+- `session-store.db` `sessions` and `turns` for list metadata and a text fallback.
 - `session-state/<uuid>/events.jsonl` for canonical event history.
-- `session-state/<uuid>/workspace.yaml` and `vscode.metadata.json` for workspace metadata.
-- `session-state/<uuid>/checkpoints/` for checkpoint details if not fully represented in the global DB.
-- `session-state/<uuid>/files/` and `research/` only as referenced artifacts, not blindly indexed.
+- `session-state/<uuid>/workspace.yaml` for list metadata of sessions without a database row.
+- Not read yet: `vscode.metadata.json`, `checkpoints/`, `files/`, and `research/`.
 
 Discovery rules:
 
-- Prefer `session-store.db.sessions` for list metadata when it references an existing `session-state/<id>` directory.
+- List every `session-state/<id>/` that has an `events.jsonl`, merged with `session-store.db.sessions` rows. Copilot does not record every session in the database (2026-10-14: 16 sessions with event logs, 22 database rows, only some overlapping). A database row title wins; `workspace.yaml` `name` is used only when `user_named` is true, because Copilot fills it with pasted prompts otherwise.
 - Use `turns` and `search_index` only as derived/searchable projections; treat `events.jsonl` as the history source of truth after local sampling proves event semantics.
-- Fall back to session directories if the global DB is missing or stale.
 - Keep legacy `history-session-state` as read-only and unsupported by default until fixtures exist.
 
 ### Parsing
@@ -119,58 +116,47 @@ Discovery rules:
 Map Copilot data into `NativeSession`:
 
 - `sessions` row -> id, cwd, repository, branch, summary/title, created/updated times.
-- `turns` row -> simple user/assistant text fallback when event parsing is unavailable.
-- `events.jsonl` -> preferred turn/tool/checkpoint source after schema sampling.
-- `checkpoints` -> `NativeRole::Compaction` or checkpoint metadata.
-- `session_files` -> `NativePart::File` references or session metadata.
-- `session_refs` -> issue/PR/URL/ref metadata.
-- `todos` -> native todo metadata if sessiongator's import model grows todo support.
-- Unknown per-session events must be preserved as raw metadata, not silently dropped.
+- `turns` row -> user/assistant text fallback when `events.jsonl` has no messages.
+- `events.jsonl` -> `session.start` (cwd, `copilotVersion`), `user.message`, `assistant.message`, `tool.execution_start` (tool call), `tool.execution_complete` (tool result), `permission.requested` (system text), and `session.shutdown` with token counts (compaction text).
+- Not read yet: `checkpoints`, `session_files`, `session_refs`, and `todos`. Other event types are skipped, not preserved.
 
 ## Target Adapter
 
 ### Write Plan
 
-Writing to Copilot requires at least:
+The writer creates:
 
 - A new `session-state/<uuid>/` directory.
-- A native `events.jsonl` containing mapped conversation history.
-- A per-session `session.db` if the target version expects it.
-- A `workspace.yaml` with cwd/repository metadata when required.
-- A global `session-store.db` transaction that inserts or updates `sessions`, `turns`, `checkpoints`, `session_files`, `session_refs`, and FTS `search_index` projections.
+- A native `events.jsonl`: `session.start`, then one `user.message` or `assistant.message` per user or assistant message, chained by `parentId`. `sessiongatorParts` keeps the native parts for a lossless read back.
+- A per-session `session.db` with the observed empty `todos`, `todo_deps`, and `inbox_entries` tables.
+- A `workspace.yaml` with cwd and title.
+- A global `session-store.db` transaction that inserts `sessions` and `turns` rows. Each turn pairs a user message with the next assistant message. Not written yet: `checkpoints`, `session_files`, `session_refs`, and the `search_index` projection.
 
-The first implementation should be conservative:
-
-- Read support first.
-- Dry-run target plans second.
-- Target writes only into isolated `--target-store` fixtures until live-store resume is verified.
-- Live writes only after exact version/schema fixtures prove `copilot --resume <id>` can load imported sessions.
+Live writes are allowed: the full pass resumed an imported session with `copilot --resume=<id> -p` and a real model on `1.0.97`.
 
 ### Atomicity
 
 - Create `session-state/<uuid>.tmp/`, write all files, then rename to `session-state/<uuid>/`.
-- Wrap global `session-store.db` changes in one immediate transaction.
-- Back up `session-store.db`, `session-store.db-wal`, `session-store.db-shm`, and the target session directory before live writes.
+- Wrap global `session-store.db` changes in one immediate transaction. The rename happens inside it, before the commit.
+- Do not copy `session-store.db` before live writes: the writer only adds rows, and `sessiongator undo --target` removes them with the session directory.
 - If any step fails, remove the temp directory and roll back the DB transaction.
 
 ### Verification
 
 After writing:
 
-- Re-read the new session through sessiongator's Copilot source adapter.
-- Verify id, cwd, repository, branch, summary/title, turn count, checkpoint count, file/ref count, and searchable text.
-- In isolated CI, run the safest available Copilot verifier, preferably a non-interactive resume/list command if exposed by the installed version.
-- Do not run a live model turn as verification unless explicitly requested; it consumes credits and may mutate files.
+- `convert` re-reads the new session through the Copilot store and compares title, cwd, and the count of user and assistant messages that hold text. A mismatch moves the written session to the trash and fails.
+- The CI probe runs `copilot --resume=<id>` without credentials in an isolated `COPILOT_HOME` and requires successful parsing.
+- Only the full pass runs a live model turn; it consumes one premium request per run.
 
 ## Mapping Policy
 
 High-confidence mappings:
 
 - Text user/assistant turns map to `turns` and event transcript entries.
-- cwd/repository/branch map to `sessions` and `workspace.yaml`.
+- cwd maps to `sessions` and `workspace.yaml`; a source `gitBranch` maps to `sessions.branch`.
 - source title/summary maps to `sessions.summary`.
-- source file references map to `session_files` when file paths are local and safe.
-- source issue/PR/URL references map to `session_refs`.
+- Not built: file references to `session_files` and issue/PR/URL references to `session_refs`.
 
 Lossy mappings requiring warnings:
 
@@ -188,25 +174,19 @@ Blocked by default:
 
 ## Version Policy
 
-Add `copilot` entries to `docs/specs/native-session-import-versions.toml` after fixture validation.
+Copilot follows the Version Policy of `native-session-import.md`; `copilot` entries live in `docs/specs/native-session-import-versions.toml`.
 
-Required support metadata:
+Recorded support metadata:
 
-- CLI version from `copilot --version`.
-- Global DB schema fingerprint from tables, columns, indexes, FTS tables, and `schema_version`.
-- Per-session DB schema fingerprint from `session.db` tables and columns.
-- Event schema fingerprint from observed `events.jsonl` event types and top-level keys.
-- Session directory layout fingerprint.
+- CLI version from `copilot --version`, and `copilotVersion` from `session.start` for sources.
+- `session-store.db` `schema_version` and a schema fingerprint of its tables and columns.
+- Not recorded yet: per-session `session.db`, event, and directory layout fingerprints.
 
-Default support policy:
-
-- Read support can allow patch versions when DB/event fingerprints match.
-- Target writes require exact version support until CI verifies `copilot --resume` can load imported sessions.
-- Legacy `history-session-state` is read-only and unsupported by default.
+Legacy `history-session-state` is not read.
 
 ## Fixtures
 
-Add sanitized fixtures under:
+Not built: tests create Copilot stores inline in `src/stores/copilot.rs`. Planned sanitized fixtures:
 
 ```text
 fixtures/native-import/copilot/<version>/
@@ -230,38 +210,34 @@ Fixtures must redact repository private URLs, GitHub usernames where not needed,
 
 ## CI Plan
 
-- Install latest Copilot CLI in the native import compatibility workflow when licensing/auth allows.
-- Validate local discovery without credentials by running `copilot --resume=<id>` without a terminal in an isolated `COPILOT_HOME`; require successful parsing and never submit a prompt.
-- If auth is available in a private/manual workflow, separately validate model continuation with a harmless prompt and no write permissions.
-- Run `sessiongator convert --from copilot --dry-run --plan-json` against fixtures and generated sessions.
-- Run target writes only into isolated `COPILOT_HOME` stores.
-- Verify readback through sessiongator first, then run Copilot's own resume/list verifier only if it is non-mutating.
-- If latest Copilot passes with an unknown version/schema, open a manifest-update PR instead of committing directly to `main`.
+- The daily probe installs the latest Copilot CLI, converts into and out of isolated `COPILOT_HOME` stores, and runs `copilot --resume=<id>` without credentials and without a terminal; it requires successful parsing and never submits a prompt.
+- The full pass on the VPS validates model continuation with `GH_TOKEN` from `gh auth token`.
+- Both open a manifest-update pull request instead of committing to `main`.
 
 ## Implementation Phases
 
-1. Add `Tool::Copilot` display/list support from `session-store.db` plus session directories.
-2. Add Copilot native reader with `turns` fallback and raw `events.jsonl` preservation.
-3. Add event parser fixtures for text, tool use, checkpoints, file refs, GitHub refs, and todos.
-4. Add Copilot dry-run plans to existing Claude/opencode/Codex targets.
-5. Add isolated target writer for `session-state/<uuid>/` and `session-store.db` projections.
-6. Verify `copilot --resume <id>` in isolated stores before live writes.
-7. Add live-store backup/locking and TUI conversion support.
+1. ✅ Add `Tool::Copilot` display/list support from `session-store.db` plus session directories.
+2. ✅ Add Copilot native reader with `turns` fallback. Raw preservation of unknown events is not built.
+3. ⬜ Add event parser fixtures for text, tool use, checkpoints, file refs, GitHub refs, and todos. Inline test stores cover text and tool events.
+4. ✅ Add Copilot dry-run plans to existing Claude/opencode/Codex targets.
+5. ✅ Add the target writer for `session-state/<uuid>/` and `session-store.db` `sessions`/`turns` rows.
+6. ✅ Verify `copilot --resume <id>` in isolated stores before live writes.
+7. ✅ Live writes use an immediate transaction and `undo`; TUI conversion is the `Ctrl+T` dry-run command.
 
 ## Acceptance Criteria
 
-- `sessiongator --list` can include Copilot sessions without reading auth/config/log files.
+- `sessiongator list` can include Copilot sessions without reading auth/config/log files.
 - `sessiongator convert --from copilot --dry-run --plan-json` reports mapped/dropped/synthesized fields.
-- Copilot source fixtures parse from both global DB metadata and per-session event files.
-- Copilot target writes round-trip through the Copilot reader in an isolated store.
-- Unknown Copilot versions fail closed by default.
-- Live writes back up touched SQLite files and session directories.
+- Copilot source stores parse from both global DB metadata and per-session event files.
+- Copilot target writes round-trip through the Copilot reader in an isolated store, and every write is read back.
+- Unsupported Copilot target versions fail closed by default.
+- `sessiongator undo --target` removes a written session's directory and rows.
 - Deprecated `gh-copilot` data is not accidentally treated as modern Copilot CLI data.
 
 ## Open Questions
 
-- Is `events.jsonl` the authoritative replay source for `1.0.68`, or does Copilot require additional per-session DB state to resume?
+- Answered for `1.0.97`: `events.jsonl` plus the `session-store.db` rows sessiongator writes are enough to resume with a model turn.
 - What is the complete `events.jsonl` schema for tool calls, approvals, shell output, file writes, checkpoints, and remote/cloud sessions?
-- Which command can verify imported sessions without consuming AI credits or mutating the working tree?
+- Answered: `copilot --resume=<id>` without credentials and without a terminal parses the session and exits without a model request.
 - Does Copilot provide a stable export/import or ACP-based API that is safer than native file/SQLite writes?
 - How should remote/cloud sessions be represented: blocked, read-only metadata, or separate target mode?
