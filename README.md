@@ -45,6 +45,8 @@ A session reference is an id, a unique id prefix, `tool:id`, or text that matche
 
 Filters for `list` and `search`: `-t/--tool` (repeatable), `-p/--here`, `-d/--dir`, `-s/--sort updated|created|msgs|path`, `-n/--limit`, and `--json` for one JSON object per line.
 
+Coding agents can use the CLI through the skill in `skills/sessiongator/SKILL.md`. Link or copy that folder into the skills folder of your agent.
+
 Shell completions: `sessiongator completions zsh` (also `bash`, `fish`, `elvish`, `powershell`).
 
 The interactive picker defaults to `auto`, following the macOS appearance like navgator. Override it for terminals with a different background:

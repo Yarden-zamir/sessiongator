@@ -16,6 +16,7 @@
 - Probe latest-tool native import compatibility only after a release build: `scripts/probe-native-import-latest.sh` (no model calls; records `probe-passed`).
 - The full pass `scripts/full-pass-native-import.sh` resumes imported sessions with real clients and model keys and records `verified`; it runs as a scheduled T3 task on the VPS.
 - Tests and scripts that write must set `SESSIONGATOR_STATE_DIR` to a temp directory, so the undo history and trash stay out of the real state directory.
+- The agent skill `skills/sessiongator/SKILL.md` documents the CLI for coding agents. Update it when a command, flag, or exit code changes. The dotfiles repo links it into `.claude/skills`.
 - Local smoke commands: `cargo run -- list -n 5`, `cargo run -- search <text> -n 5`, and `cargo run -- convert <session> --dry-run`.
 - Releases are triggered by changing the package version in `Cargo.toml` on `main`; update the matching root package version in `Cargo.lock`. A manual release workflow run only retries the current release and Homebrew sync.
 
