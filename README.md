@@ -43,9 +43,11 @@ sessiongator history
 
 A session reference is an id, a unique id prefix, `tool:id`, or text that matches one session title, path, or model. Without a reference, `show`, `resume`, and `path` use the newest session in the current project. A reference that matches several sessions fails and lists the candidates.
 
-Filters for `list` and `search`: `-t/--tool` (repeatable), `-p/--here`, `-d/--dir`, `-s/--sort updated|created|msgs|path`, `-n/--limit`, and `--json` for one JSON object per line.
+Filters for `list` and `search`: `-t/--tool` (repeatable), `-p/--here`, `-d/--dir`, `-s/--sort updated|created|msgs|path`, and `-n/--limit`.
 
 Coding agents can use the CLI through the skill in `skills/sessiongator/SKILL.md`. Link or copy that folder into the skills folder of your agent.
+
+`list`, `search`, `show`, and `history` print JSON by default: one JSON object per line, or one object with a `turns` list for `show`. Add `--text` for readable text (tab-separated columns for `list`, `search`, and `history`).
 
 Shell completions: `sessiongator completions zsh` (also `bash`, `fish`, `elvish`, `powershell`).
 

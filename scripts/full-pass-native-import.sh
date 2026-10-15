@@ -89,7 +89,7 @@ convert() {
 # The last assistant message, as sessiongator reads it, holds the word.
 answered() {
   local tool="$1" id="$2"
-  "$bin" show --tool "$tool" "$tool:$id" --json > "$artifacts/readback-$tool.json"
+  "$bin" show --tool "$tool" "$tool:$id" > "$artifacts/readback-$tool.json"
   jq -e --arg word "$word" \
     '[.turns[] | select(.role == "assistant") | .text] | last // "" | ascii_upcase | contains($word)' \
     "$artifacts/readback-$tool.json" > /dev/null
