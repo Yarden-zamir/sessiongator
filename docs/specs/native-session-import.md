@@ -315,7 +315,10 @@ Fixture rules:
 - Write a Claude source session whose only secret is a random code word.
 - Convert it to each tool, resume the converted session with the real client and a real model, and ask for the word.
 - A tool passes when sessiongator reads the session back and the last assistant message holds the word. This checks that the tool loaded the imported history and that sessiongator reads what this tool version wrote.
-- Record passing versions as `verified` and open a pull request.
+- Check each tool alone. Each tool has its own result: `passed`, `failed`, or `skipped`.
+- A tool is `skipped` when its client cannot take part: no login, no model setting, or an error reported by the client itself, such as a usage limit. A skipped tool says nothing about sessiongator. It is not recorded.
+- A tool is `failed` when the client ran and the reply did not hold the code word, or when a conversion or read-back failed. Only a failed tool makes the script exit with a non-zero status.
+- Record passing versions as `verified` and open a pull request. A failed or skipped tool never blocks the record of the other tools.
 - Stores: Claude uses its real store and the session moves to a temp trash afterwards, because a copied login could rotate the real refresh token. Codex uses `FULL_PASS_CODEX_HOME`, which must hold a Codex login. opencode and Copilot use temp stores; the opencode login is imported from `FULL_PASS_OPENCODE_AUTH_DB`.
 - Limit: OpenCode's free models reject resumed imported sessions (`FreeTierError`, HTTP 403), even though OpenCode loads the session; a native session with an appended sessiongator message is accepted. So the opencode check needs a provider login and `FULL_PASS_OPENCODE_MODEL`. Revisit when OpenCode documents what the free tier checks.
 
