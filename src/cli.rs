@@ -85,9 +85,9 @@ pub enum Command {
         /// Only print turns that contain this text.
         #[arg(short, long)]
         grep: Option<String>,
-        /// Print JSON instead of text.
+        /// Print readable text instead of JSON.
         #[arg(long)]
-        json: bool,
+        text: bool,
     },
     /// Resume a session with its tool, in the session directory.
     #[command(visible_alias = "r")]
@@ -130,9 +130,9 @@ pub enum Command {
         /// Print at most N operations, newest first.
         #[arg(short = 'n', long)]
         limit: Option<usize>,
-        /// Print one JSON object per line.
+        /// Print tab-separated text instead of one JSON object per line.
         #[arg(long)]
-        json: bool,
+        text: bool,
     },
     /// Show the installed tool versions and their conversion support.
     #[command(visible_alias = "versions")]
@@ -160,9 +160,9 @@ pub struct FilterArgs {
     /// Print at most N sessions.
     #[arg(short = 'n', long)]
     limit: Option<usize>,
-    /// Print one JSON object per line instead of tab-separated columns.
+    /// Print tab-separated columns instead of one JSON object per line.
     #[arg(long)]
-    json: bool,
+    text: bool,
 }
 
 #[derive(Args)]
@@ -178,7 +178,7 @@ pub fn run(command: Command) -> AppResult<()> {
     let result = match command {
         Command::List { query, filter } => list(&query.join(" "), &filter, SearchMode::Sessions),
         Command::Search { query, filter } => list(&query.join(" "), &filter, SearchMode::All),
-        Command::Show { target, grep, json } => show(&target, grep.as_deref(), json),
+        Command::Show { target, grep, text } => show(&target, grep.as_deref(), text),
         Command::Resume {
             target,
             here,
@@ -191,7 +191,7 @@ pub fn run(command: Command) -> AppResult<()> {
         Command::Convert(args) => run_convert(args),
         Command::Delete { target, yes } => delete(&target, yes),
         Command::Undo { operation, target } => undo(operation.as_deref(), target),
-        Command::History { limit, json } => history(limit, json),
+        Command::History { limit, text } => history(limit, text),
         Command::Compat => compat(),
         Command::ConfigSchema => {
             writeln!(io::stdout(), "{}", crate::config::config_schema_json()?).map_err(Into::into)
@@ -249,7 +249,7 @@ fn list(query: &str, filter: &FilterArgs, mode: SearchMode) -> AppResult<()> {
         let snippet = content
             .get(&session.key())
             .and_then(|text| match_snippet(text, query, 40));
-        if filter.json {
+        if !filter.text {
             let mut value = session_json(session);
             value["match"] = json!(snippet);
             writeln!(out, "{value}")?;
@@ -324,7 +324,7 @@ fn resolve_target(target: &SessionArgs) -> AppResult<Session> {
         })
 }
 
-fn show(target: &SessionArgs, grep: Option<&str>, as_json: bool) -> AppResult<()> {
+fn show(target: &SessionArgs, grep: Option<&str>, as_text: bool) -> AppResult<()> {
     let session = resolve_target(target)?;
     let turns = store_for(session.tool, None).transcript(&session.id)?;
     let needle = grep.map(str::to_lowercase);
@@ -337,7 +337,7 @@ fn show(target: &SessionArgs, grep: Option<&str>, as_json: bool) -> AppResult<()
         })
         .collect();
     let mut out = io::stdout().lock();
-    if as_json {
+    if !as_text {
         let mut value = session_json(&session);
         value["turns"] = turns
             .iter()
@@ -474,12 +474,12 @@ fn undo(operation: Option<&str>, remove_target: bool) -> AppResult<()> {
     Ok(())
 }
 
-fn history(limit: Option<usize>, as_json: bool) -> AppResult<()> {
+fn history(limit: Option<usize>, as_text: bool) -> AppResult<()> {
     let operations = History::open().load()?;
     let now = now_ms();
     let mut out = io::stdout().lock();
     for operation in operations.iter().rev().take(limit.unwrap_or(usize::MAX)) {
-        if as_json {
+        if !as_text {
             writeln!(out, "{}", serde_json::to_string(operation)?)?;
             continue;
         }
@@ -577,6 +577,28 @@ mod tests {
         assert_eq!(filter.sort, SortMode::Updated);
         assert!(parse(&["list", "--here", "--dir", "/tmp"]).is_err());
         assert!(parse(&["search"]).is_err());
+    }
+
+    #[test]
+    fn data_commands_default_to_json_and_take_text() {
+        let Some(Command::List { filter, .. }) = parse(&["list"]).unwrap().command else {
+            panic!("expected list");
+        };
+        assert!(!filter.text);
+        let Some(Command::Search { filter, .. }) = parse(&["s", "x", "--text"]).unwrap().command
+        else {
+            panic!("expected search");
+        };
+        assert!(filter.text);
+        assert!(matches!(
+            parse(&["show", "--text"]).unwrap().command,
+            Some(Command::Show { text: true, .. })
+        ));
+        assert!(matches!(
+            parse(&["history"]).unwrap().command,
+            Some(Command::History { text: false, .. })
+        ));
+        assert!(parse(&["list", "--json"]).is_err());
     }
 
     #[test]

@@ -58,7 +58,7 @@ Codex and Copilot sources are specified in
 - **Title:** `ai-title` event's `aiTitle` field; else first `user` **string**
   content (skip `tool_result` user events), truncated. Titles are
   whitespace-normalized (newlines/tabs collapsed) so they are always safe for
-  one-line rows and tab-separated `list` output.
+  one-line rows and tab-separated `--text` output.
 - **Model:** `assistant.message.model` (e.g. `claude-opus-4-8`).
 - **Searchable text:** `message.content` string, or `content[].text` where
   `type == "text"`. `thinking`/`tool_use`/`tool_result` blocks are excluded from

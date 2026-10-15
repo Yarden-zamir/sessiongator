@@ -23,8 +23,8 @@ A session reference is an id, a unique id prefix, `tool:id`, or text that matche
   - `--dir <dir>` limits to a folder and below.
   - `--sort <updated|created|msgs|path>` changes the order.
   - `-n <count>` limits the number of rows.
-- Add `--json` when a script reads the output. Each line is one session.
-- Output columns without `--json`: tool, id, age, folder, title, and for `search` a text snippet.
+- Output is JSON by default. Each line is one session with fields such as `id`, `key`, `tool`, `cwd`, `title`, `messageCount`, `model`, and `sourceRef`. `search` adds `match`, a snippet of the matching text.
+- Add `--text` for tab-separated columns: tool, id, age, folder, title, and for `search` a text snippet.
 
 Examples:
 
@@ -39,9 +39,9 @@ If many sessions match, narrow with `--here`, `--tool`, or a more exact phrase b
 ## Read a session
 
 ```sh
-sessiongator show <session>                  # full transcript
+sessiongator show <session>                  # JSON: session fields and a `turns` list of role and text
 sessiongator show <session> --grep migration # only turns that contain the text
-sessiongator show <session> --json
+sessiongator show <session> --text           # readable transcript
 ```
 
 Read the transcript to answer "what did we decide" or "what was done".
@@ -77,7 +77,7 @@ sessiongator convert <session> --to codex --mark-source
 
 ## Undo and delete
 
-- `sessiongator history` lists conversions and deletes that `undo` can revert.
+- `sessiongator history` lists conversions and deletes that `undo` can revert. It prints JSON by default and takes `--text`.
 - `sessiongator undo` reverts the newest operation. Pass an operation id from `history` to revert an older one.
 - `sessiongator undo --target` also moves the session that a conversion created to the trash.
 - `sessiongator delete <session> --yes` moves a session to the sessiongator trash. It does not erase it.
