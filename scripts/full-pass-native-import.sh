@@ -6,6 +6,10 @@
 # and sessiongator reads what this tool version wrote. Passing tools are
 # recorded as `verified` in docs/specs/native-session-import-versions.toml.
 #
+# Each tool is its own check with its own result: passed, failed, or skipped.
+# A tool is skipped when its client cannot take part (no login, usage limit),
+# which says nothing about sessiongator. Only a failed tool fails the run.
+#
 # Needs: a release build of sessiongator, jq, node, and logged-in clients on
 # PATH. Claude writes to its real store (a copied login could rotate the real
 # refresh token); the session is moved to a temp trash afterwards. Codex uses
@@ -45,6 +49,13 @@ cleanup() {
   rm -rf "$tmp"
 }
 trap cleanup EXIT
+
+# A check returns this status when its client cannot take part.
+unavailable_status=75
+unavailable() {
+  echo "$*" >&2
+  return "$unavailable_status"
+}
 
 limit() {
   if command -v timeout > /dev/null; then timeout 600 "$@"; else "$@"; fi
@@ -92,10 +103,17 @@ check_claude() {
   (cd "$project" && limit claude -p --permission-mode default --model "$claude_model" \
     --resume "$id" --output-format json "$question") > "$artifacts/answer-claude.json"
   # Settings with `verbose` print an array of events instead of one result.
-  resumed="$(jq -r 'if type == "array" then map(select(.type == "result"))[0] else . end | .session_id' \
+  local result
+  result="$(jq -c 'if type == "array" then map(select(.type == "result"))[0] else . end' \
     "$artifacts/answer-claude.json")"
+  resumed="$(jq -r .session_id <<< "$result")"
   local status=0
-  answered claude "$resumed" || status=1
+  if [[ "$(jq -r .is_error <<< "$result")" == true ]]; then
+    # Claude reported its own error (usage limit, login) instead of an answer.
+    unavailable "claude: $(jq -r .result <<< "$result")" || status=$?
+  else
+    answered claude "$resumed" || status=1
+  fi
   "$bin" delete --tool claude "$id" --yes > /dev/null
   if [[ "$resumed" != "$id" ]]; then
     "$bin" delete --tool claude "$resumed" --yes > /dev/null
@@ -117,8 +135,8 @@ check_opencode() {
   # HTTP 403), so the full pass needs a real provider login. OpenCode 2 keeps
   # logins in its database; the login moves into the temp database unprinted.
   if [[ ! -f "$opencode_auth_db" || -z "${FULL_PASS_OPENCODE_MODEL:-}" ]]; then
-    echo "opencode: needs a provider login in $opencode_auth_db and FULL_PASS_OPENCODE_MODEL" >&2
-    return 1
+    unavailable "opencode: needs a provider login in $opencode_auth_db and FULL_PASS_OPENCODE_MODEL"
+    return
   fi
   oc session list --format json > /dev/null
   OPENCODE_DB="$opencode_auth_db" limit opencode auth export --standalone |
@@ -132,8 +150,8 @@ check_opencode() {
 check_codex() {
   local id status=0
   if ! CODEX_HOME="$codex_home" codex login status > "$artifacts/codex-login.txt" 2>&1; then
-    echo "codex: not logged in at $codex_home" >&2
-    return 1
+    unavailable "codex: not logged in at $codex_home"
+    return
   fi
   id="$(convert claude "$source_id" "$source_root" codex "$codex_home")"
   (cd "$project" && CODEX_HOME="$codex_home" limit codex exec resume --skip-git-repo-check --json \
@@ -145,7 +163,11 @@ check_codex() {
 
 check_copilot() {
   local home="$tmp/copilot" id token
-  token="${GH_TOKEN:-$(gh auth token)}"
+  token="${GH_TOKEN:-$(gh auth token 2> /dev/null || true)}"
+  if [[ -z "$token" ]]; then
+    unavailable "copilot: no GH_TOKEN and no gh login"
+    return
+  fi
   id="$(convert claude "$source_id" "$source_root" copilot "$home")"
   (cd "$project" && COPILOT_HOME="$home" GH_TOKEN="$token" limit copilot --resume="$id" \
     -p "$question" ${FULL_PASS_COPILOT_MODEL:+--model "$FULL_PASS_COPILOT_MODEL"} \
@@ -158,15 +180,25 @@ failed=()
 summary="[]"
 for tool in $tools; do
   version="$("$tool" --version 2> /dev/null | head -1 || true)"
-  if "check_$tool" 2> "$artifacts/error-$tool.txt"; then
-    passed+=("$tool")
-    result=passed
-  else
-    failed+=("$tool")
-    result=failed
-    echo "$tool failed:" >&2
-    tail -20 "$artifacts/error-$tool.txt" >&2
-  fi
+  code=0
+  "check_$tool" 2> "$artifacts/error-$tool.txt" || code=$?
+  case "$code" in
+    0)
+      passed+=("$tool")
+      result=passed
+      ;;
+    "$unavailable_status")
+      result=skipped
+      echo "$tool skipped:" >&2
+      tail -5 "$artifacts/error-$tool.txt" >&2
+      ;;
+    *)
+      failed+=("$tool")
+      result=failed
+      echo "$tool failed:" >&2
+      tail -20 "$artifacts/error-$tool.txt" >&2
+      ;;
+  esac
   echo "$tool ($version): $result"
   summary="$(jq -c --arg tool "$tool" --arg version "$version" --arg result "$result" \
     '. + [{tool: $tool, version: $version, result: $result}]' <<< "$summary")"
