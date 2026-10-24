@@ -241,3 +241,31 @@ version = "1.0.98"
 status = "verified"
 source = "full-pass-yarden-zamir-vps-2"
 notes = "Full pass: the tool resumed an imported session with a real model and answered from its history; sessiongator read the reply back."
+
+[[tools]]
+tool = "claude"
+version = "2.1.310"
+status = "probe-passed"
+source = "ci-probe"
+notes = "Every tool pair converted in isolated stores; the tool exported, read, or parsed each written session without model calls."
+
+[[tools]]
+tool = "opencode"
+version = "2.1.4"
+status = "probe-passed"
+source = "ci-probe"
+notes = "Every tool pair converted in isolated stores; the tool exported, read, or parsed each written session without model calls."
+
+[[tools]]
+tool = "codex"
+version = "0.164.0"
+status = "probe-passed"
+source = "ci-probe"
+notes = "Every tool pair converted in isolated stores; the tool exported, read, or parsed each written session without model calls."
+
+[[tools]]
+tool = "copilot"
+version = "1.0.103"
+status = "probe-passed"
+source = "ci-probe"
+notes = "Every tool pair converted in isolated stores; the tool exported, read, or parsed each written session without model calls."
