@@ -83,13 +83,13 @@ Actions: `cancel`, `resume`, `resume-here`, `show-path`, `convert`, `copy-id`, `
 
 The keys footer always reflects the active bindings.
 
-Dry-run a native conversion. The source tool comes from the session, and the target defaults to opencode for Claude sessions, else claude:
+Dry-run a native conversion. The source tool comes from the session, and the target defaults to codex for Claude sessions, else claude:
 
 ```sh
 sessiongator convert e4255e84 --dry-run
 sessiongator convert 'rate limiter' --to codex --mark-source    # note in the original: where it went, how to resume
 sessiongator convert 'rate limiter' --to codex --delete-source  # original to the trash
-sessiongator convert --from claude --to opencode --id <session-id> --dry-run --plan-json
+sessiongator convert --from claude --to codex --id <session-id> --dry-run --plan-json
 ```
 
 `sessiongator undo` removes the note or restores the original; `undo --target` also removes the converted copy. opencode targets must be OpenCode 2 databases.

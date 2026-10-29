@@ -46,7 +46,7 @@ impl Tool {
 
     pub fn default_convert_target(self) -> Self {
         match self {
-            Self::Claude => Self::Opencode,
+            Self::Claude => Self::Codex,
             Self::Opencode | Self::Codex | Self::Copilot => Self::Claude,
         }
     }
