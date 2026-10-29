@@ -79,7 +79,7 @@ sessiongator convert [<session>] [--id <session-id>] [--from <tool>] [--to <tool
 Options:
 
 - `--from <tool>`: source tool. Default: the tool that owns `<session>`. `--from` and `--id` together skip the session lookup.
-- `--to <tool>`: target tool. Default: opencode for Claude sessions, else claude.
+- `--to <tool>`: target tool. Default: codex for Claude sessions, else claude.
 
 - `--target-store <path>`: target config root or database. Defaults to the target tool's normal store.
 - `--source-store <path>`: source config root or database. Defaults to the source tool's normal store. Requires `--from` and `--id`.

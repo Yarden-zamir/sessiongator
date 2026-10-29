@@ -25,7 +25,7 @@ use versions::{detect_cli_version, newest_known, support, Role, Support};
 #[command(after_help = "Examples:
   sessiongator convert e4255e84 --dry-run
   sessiongator convert 'rate limiter' --to codex --mark-source
-  sessiongator convert --from claude --to opencode --id <session-id> --dry-run --plan-json")]
+  sessiongator convert --from claude --to codex --id <session-id> --dry-run --plan-json")]
 pub struct ConvertArgs {
     /// Session to convert: id, unique id prefix, `tool:id`, or search text.
     #[arg(conflicts_with = "id")]
@@ -36,7 +36,7 @@ pub struct ConvertArgs {
     /// Source tool. Default: the tool that owns the session.
     #[arg(long, value_enum)]
     from: Option<Tool>,
-    /// Target tool. Default: opencode for Claude sessions, else claude.
+    /// Target tool. Default: codex for Claude sessions, else claude.
     #[arg(long, value_enum)]
     to: Option<Tool>,
     /// Source config root or database. Requires --from and --id.

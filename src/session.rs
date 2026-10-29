@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(line(CoreAction::ShowPath, &claude), "path\t/store/ref");
         assert_eq!(
             line(CoreAction::Convert, &claude),
-            "convert\tclaude\topencode\tabc-123\t/Users/me/proj"
+            "convert\tclaude\tcodex\tabc-123\t/Users/me/proj"
         );
         for (tool, id) in [
             (Tool::Opencode, "ses_1"),

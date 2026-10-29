@@ -17,7 +17,8 @@
 # use temp stores.
 #
 # Environment:
-#   FULL_PASS_TOOLS           tools to check (default: claude opencode codex copilot)
+#   FULL_PASS_TOOLS           tools to check (default: claude codex copilot; add opencode
+#                             to check it too)
 #   FULL_PASS_CLAUDE_MODEL    default: haiku
 #   FULL_PASS_OPENCODE_AUTH_DB  opencode database that holds a provider login;
 #                             default: ~/.local/share/sessiongator-fullpass/opencode-auth.db
@@ -31,7 +32,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bin="${SESSIONGATOR_BIN:-$repo_root/target/release/sessiongator}"
-tools="${FULL_PASS_TOOLS:-claude opencode codex copilot}"
+tools="${FULL_PASS_TOOLS:-claude codex copilot}"
 claude_model="${FULL_PASS_CLAUDE_MODEL:-haiku}"
 opencode_auth_db="${FULL_PASS_OPENCODE_AUTH_DB:-$HOME/.local/share/sessiongator-fullpass/opencode-auth.db}"
 codex_home="${FULL_PASS_CODEX_HOME:-$HOME/.local/share/sessiongator-fullpass/codex-home}"
